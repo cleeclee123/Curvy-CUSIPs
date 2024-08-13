@@ -17,11 +17,13 @@ JSON: TypeAlias = dict[str, "JSON"] | list["JSON"] | str | int | float | bool | 
 
 
 def build_treasurydirect_header(
-    host_str: str = "api.fiscaldata.treasury.gov",
+    host_str: Optional[str] = "api.fiscaldata.treasury.gov",
     cookie_str: Optional[str] = None,
+    origin_str: Optional[str] = None,
+    referer_str: Optional[str] = None,
 ):
     return {
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7,application/json",
         "Accept-Encoding": "gzip, deflate, br, zstd",
         "Accept-Language": "en-US,en;q=0.9",
         "Cache-Control": "no-cache",
@@ -29,6 +31,8 @@ def build_treasurydirect_header(
         "Cookie": cookie_str or "",
         "DNT": "1",
         "Host": host_str or "",
+        "Origin": origin_str or "",
+        "Referer": referer_str or "",
         "Pragma": "no-cache",
         "Sec-CH-UA": '"Not)A;Brand";v="99", "Google Chrome";v="127", "Chromium";v="127"',
         "Sec-CH-UA-Mobile": "?0",
@@ -284,7 +288,10 @@ def get_active_cusips(auction_json: JSON, as_of_date=datetime.today()) -> pd.Dat
     historical_auctions_df = historical_auctions_df.drop(
         historical_auctions_df[
             (historical_auctions_df["security_type"] == "Bill")
-            & (historical_auctions_df["original_security_term"] != historical_auctions_df["security_term"])
+            & (
+                historical_auctions_df["original_security_term"]
+                != historical_auctions_df["security_term"]
+            )
         ].index
     )
     historical_auctions_df = historical_auctions_df[
@@ -293,5 +300,23 @@ def get_active_cusips(auction_json: JSON, as_of_date=datetime.today()) -> pd.Dat
     historical_auctions_df = historical_auctions_df[
         historical_auctions_df["maturity_date"] >= as_of_date
     ]
-    historical_auctions_df = historical_auctions_df.drop_duplicates(subset=["cusip"], keep="first")
-    return historical_auctions_df 
+    historical_auctions_df = historical_auctions_df.drop_duplicates(
+        subset=["cusip"], keep="first"
+    )
+    return historical_auctions_df
+
+
+def last_day_n_months_ago(given_date: datetime, n: int = 1, return_all: bool = False) -> datetime | List[datetime]:
+    if return_all:
+        given_date = pd.Timestamp(given_date)
+        return [(given_date - pd.offsets.MonthEnd(i)).to_pydatetime() for i in range(1, n + 1)] 
+            
+    given_date = pd.Timestamp(given_date)
+    last_day = given_date - pd.offsets.MonthEnd(n)
+    return last_day.to_pydatetime()
+
+
+def cookie_string_to_dict(cookie_string):
+    cookie_pairs = cookie_string.split('; ')
+    cookie_dict = {pair.split('=')[0]: pair.split('=')[1] for pair in cookie_pairs if '=' in pair}
+    return cookie_dict
