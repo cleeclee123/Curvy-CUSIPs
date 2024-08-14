@@ -27,6 +27,7 @@ from utils import (
     last_day_n_months_ago,
     is_valid_ust_cusip,
     historical_auction_cols,
+    get_last_n_off_the_run_cusips,
 )
 from RL_BondPricer import RL_BondPricer
 from QL_BondPricer import QL_BondPricer
@@ -67,17 +68,20 @@ class CUSIP_Curve:
     _logger = logging.getLogger()
     _debug_verbose: bool = False
     _info_verbose: bool = False  # performance benchmarking mainly
-    _no_logs_plz: bool = False
+    _no_logs_plz: bool = (False,)
+    _use_ust_issue_date: bool = False,
 
     def __init__(
         self,
         debug_verbose: Optional[bool] = False,
         info_verbose: Optional[bool] = False,
         no_logs_plz: Optional[bool] = False,  # temp
+        use_ust_issue_date: Optional[bool] = False,
     ):
         self._debug_verbose = debug_verbose
         self._info_verbose = info_verbose
         self._no_logs_plz = no_logs_plz
+        self._use_ust_issue_date = use_ust_issue_date
         if self._debug_verbose:
             self._logger.setLevel(self._logger.DEBUG)
         if self._info_verbose:
@@ -137,7 +141,9 @@ class CUSIP_Curve:
                 json_data = response.json()
                 if as_of_date:
                     df = get_active_cusips(
-                        auction_json=json_data["data"], as_of_date=as_of_date
+                        auction_json=json_data["data"],
+                        as_of_date=as_of_date,
+                        use_issue_date=self._use_ust_issue_date,
                     )
                     if uid:
                         return df[historical_auction_cols()], uid
@@ -800,7 +806,7 @@ class CUSIP_Curve:
 
         return concatenated_dfs
 
-    def build_curve_set(self, as_of_date: datetime):
+    def build_curve_set(self, as_of_date: datetime, calc_ytms: Optional[bool] = True):
         async def gather_tasks(client: httpx.AsyncClient, as_of_date: datetime):
             ust_historical_auction_tasks = (
                 await self._build_fetch_tasks_historical_treasury_auctions(
@@ -850,6 +856,16 @@ class CUSIP_Curve:
                 self._logger.warning(f"CURVE SET - unknown UID, Current Tuple: {tup}")
 
         auctions_df = pd.concat(auctions_dfs)
+        otr_cusips_dict = get_last_n_off_the_run_cusips(
+            auctions_df=auctions_df,
+            n=0,
+            filtered=True,
+            as_of_date=as_of_date,
+            use_issue_date=self._use_ust_issue_date,
+        )[0]
+        auctions_df["is_on_the_run"] = auctions_df["cusip"].isin(
+            list(otr_cusips_dict.values())
+        )
         merged_df = reduce(
             lambda left, right: pd.merge(left, right, on="cusip", how="outer"), dfs
         )
@@ -857,16 +873,16 @@ class CUSIP_Curve:
         merged_df = merged_df[merged_df["cusip"].apply(is_valid_ust_cusip)]
         merged_df["mid_price"] = (merged_df["offer_price"] + merged_df["bid_price"]) / 2
 
-        calculate_yields_partial = partial(calculate_yields, as_of_date=as_of_date)
-        with mp.Pool(mp.cpu_count()) as pool:
-            results = pool.map(
-                calculate_yields_partial, [row for _, row in merged_df.iterrows()]
-            )
-
-        offer_yields, bid_yields, eod_yields = zip(*results)
-        merged_df["offer_yield"] = offer_yields
-        merged_df["bid_yield"] = bid_yields
-        merged_df["eod_yield"] = eod_yields
-
-        merged_df["mid_yield"] = (merged_df["offer_yield"] + merged_df["bid_yield"]) / 2
+        if calc_ytms:
+            calculate_yields_partial = partial(calculate_yields, as_of_date=as_of_date)
+            with mp.Pool(mp.cpu_count()) as pool:
+                results = pool.map(
+                    calculate_yields_partial, [row for _, row in merged_df.iterrows()]
+                )
+            offer_yields, bid_yields, eod_yields = zip(*results)
+            merged_df["offer_yield"] = offer_yields
+            merged_df["bid_yield"] = bid_yields
+            merged_df["eod_yield"] = eod_yields
+            merged_df["mid_yield"] = (merged_df["offer_yield"] + merged_df["bid_yield"]) / 2
+        
         return merged_df

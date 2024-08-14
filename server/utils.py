@@ -176,9 +176,19 @@ def multi_download_year_treasury_par_yield_curve_rate(
 
 # n == 0 => On-the-runs
 def get_last_n_off_the_run_cusips(
-    auctions_json: JSON, n=0, filtered=False, as_of_date=datetime.today()
+    auction_json: Optional[JSON] = None,
+    auctions_df: Optional[pd.DataFrame] = None,
+    n=0,
+    filtered=False,
+    as_of_date=datetime.today(),
+    use_issue_date=False,
 ) -> List[Dict[str, str]]:
-    auctions_df = pd.DataFrame(auctions_json)
+    if not auction_json and auctions_df is None:
+        return pd.DataFrame(columns=historical_auction_cols())
+
+    if auction_json and auctions_df is None:
+        auctions_df = pd.DataFrame(auction_json)
+
     auctions_df = auctions_df[
         (auctions_df["security_type"] != "TIPS")
         & (auctions_df["security_type"] != "TIPS Note")
@@ -198,11 +208,15 @@ def get_last_n_off_the_run_cusips(
         ].index
     )
     auctions_df["auction_date"] = pd.to_datetime(auctions_df["auction_date"])
-    current_date = as_of_date
-    auctions_df = auctions_df[auctions_df["auction_date"] <= current_date]
-
     auctions_df["issue_date"] = pd.to_datetime(auctions_df["issue_date"])
-    auctions_df = auctions_df.sort_values("issue_date", ascending=False)
+    current_date = as_of_date
+    auctions_df = auctions_df[
+        auctions_df["auction_date" if not use_issue_date else "issue_date"]
+        <= current_date
+    ]
+    auctions_df = auctions_df.sort_values(
+        "auction_date" if not use_issue_date else "issue_date", ascending=False
+    )
 
     mapping = {
         "17-Week": 0.25,
@@ -269,8 +283,18 @@ def get_last_n_off_the_run_cusips(
     return wrapper
 
 
-def get_active_cusips(auction_json: JSON, as_of_date=datetime.today()) -> pd.DataFrame:
-    historical_auctions_df = pd.DataFrame(auction_json)
+def get_active_cusips(
+    auction_json: Optional[JSON] = None,
+    historical_auctions_df: Optional[pd.DataFrame] = None,
+    as_of_date=datetime.today(),
+    use_issue_date=False,
+) -> pd.DataFrame:
+    if not auction_json and historical_auctions_df is None:
+        return pd.DataFrame(columns=historical_auction_cols())
+
+    if auction_json and historical_auctions_df is None:
+        historical_auctions_df = pd.DataFrame(auction_json)
+
     historical_auctions_df["issue_date"] = pd.to_datetime(
         historical_auctions_df["issue_date"]
     )
@@ -295,7 +319,8 @@ def get_active_cusips(auction_json: JSON, as_of_date=datetime.today()) -> pd.Dat
         ].index
     )
     historical_auctions_df = historical_auctions_df[
-        historical_auctions_df["auction_date"] <= as_of_date
+        historical_auctions_df["auction_date" if not use_issue_date else "issue_date"]
+        <= as_of_date
     ]
     historical_auctions_df = historical_auctions_df[
         historical_auctions_df["maturity_date"] >= as_of_date
@@ -303,7 +328,9 @@ def get_active_cusips(auction_json: JSON, as_of_date=datetime.today()) -> pd.Dat
     historical_auctions_df = historical_auctions_df.drop_duplicates(
         subset=["cusip"], keep="first"
     )
-    historical_auctions_df["int_rate"] = pd.to_numeric(historical_auctions_df["int_rate"], errors="coerce")
+    historical_auctions_df["int_rate"] = pd.to_numeric(
+        historical_auctions_df["int_rate"], errors="coerce"
+    )
     return historical_auctions_df
 
 
@@ -372,6 +399,7 @@ def historical_auction_cols():
         "noncomp_tenders_accepted",
         "offering_amt",
         "original_security_term",
+        "security_term_week_year",
         "primary_dealer_accepted",
         "primary_dealer_tendered",
         "reopening",
