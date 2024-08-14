@@ -6,6 +6,7 @@ import time
 from collections import defaultdict
 from datetime import datetime
 from itertools import product
+from functools import reduce, partial
 from typing import Dict, List, Optional, Tuple, TypeAlias
 
 import aiohttp
@@ -17,37 +18,81 @@ import QuantLib as ql
 import requests
 import ujson as json
 from scipy.optimize import minimize
+
 from utils import (
     JSON,
     build_treasurydirect_header,
     cookie_string_to_dict,
     get_active_cusips,
     last_day_n_months_ago,
+    is_valid_ust_cusip,
+    historical_auction_cols,
 )
+from RL_BondPricer import RL_BondPricer
+from QL_BondPricer import QL_BondPricer
+
+
+def calculate_yields(row, as_of_date):
+    offer_yield = RL_BondPricer.bond_price_to_ytm(
+        type=row["security_type"],
+        issue_date=row["issue_date"],
+        maturity_date=row["maturity_date"],
+        as_of=as_of_date,
+        coupon=row["int_rate"] / 100,
+        price=row["offer_price"],
+    )
+
+    bid_yield = RL_BondPricer.bond_price_to_ytm(
+        type=row["security_type"],
+        issue_date=row["issue_date"],
+        maturity_date=row["maturity_date"],
+        as_of=as_of_date,
+        coupon=row["int_rate"] / 100,
+        price=row["bid_price"],
+    )
+
+    eod_yield = RL_BondPricer.bond_price_to_ytm(
+        type=row["security_type"],
+        issue_date=row["issue_date"],
+        maturity_date=row["maturity_date"],
+        as_of=as_of_date,
+        coupon=row["int_rate"] / 100,
+        price=row["eod_price"],
+    )
+
+    return offer_yield, bid_yield, eod_yield
 
 
 class CUSIP_Curve:
     _logger = logging.getLogger()
     _debug_verbose: bool = False
     _info_verbose: bool = False  # performance benchmarking mainly
+    _no_logs_plz: bool = False
 
     def __init__(
         self,
         debug_verbose: Optional[bool] = False,
         info_verbose: Optional[bool] = False,
+        no_logs_plz: Optional[bool] = False,  # temp
     ):
         self._debug_verbose = debug_verbose
         self._info_verbose = info_verbose
+        self._no_logs_plz = no_logs_plz
         if self._debug_verbose:
-            self._logger.setLevel(logging.DEBUG)
+            self._logger.setLevel(self._logger.DEBUG)
         if self._info_verbose:
-            self._logger.setLevel(logging.INFO)
+            self._logger.setLevel(self._logger.INFO)
+        if self._no_logs_plz:
+            self._logger.disabled = True
+            self._logger.propagate = False
 
     async def _build_fetch_tasks_historical_treasury_auctions(
         self,
         client: httpx.AsyncClient,
         assume_data_size=True,
         uid: Optional[str | int] = None,
+        return_df: Optional[bool] = False,
+        as_of_date: Optional[datetime] = None,  # active cusips as of
     ):
         MAX_TREASURY_GOV_API_CONTENT_SIZE = 10000
         NUM_REQS_NEEDED_TREASURY_GOV_API = 2
@@ -76,17 +121,59 @@ class CUSIP_Curve:
                 for i in range(0, NUM_REQS_NEEDED_TREASURY_GOV_API)
             ]
         )
-        logging.debug(f"UST Auctions - Number of Links to Fetch: {len(links)}")
-        logging.debug(f"UST Auctions - Links: {links}")
+        self._logger.debug(f"UST Auctions - Number of Links to Fetch: {len(links)}")
+        self._logger.debug(f"UST Auctions - Links: {links}")
 
-        async def fetch(client: httpx.AsyncClient, url):
-            response = await client.get(url, headers=build_treasurydirect_header())
-            json_data = response.json()
-            if uid:
-                return json_data["data"], uid
-            return json_data["data"]
+        async def fetch(
+            client: httpx.AsyncClient,
+            url,
+            as_of_date: Optional[datetime] = None,
+            return_df: Optional[bool] = False,
+            uid: Optional[str | int] = None,
+        ):
+            try:
+                response = await client.get(url, headers=build_treasurydirect_header())
+                response.raise_for_status()
+                json_data = response.json()
+                if as_of_date:
+                    df = get_active_cusips(
+                        auction_json=json_data["data"], as_of_date=as_of_date
+                    )
+                    if uid:
+                        return df[historical_auction_cols()], uid
+                    return df[historical_auction_cols()]
 
-        tasks = [fetch(client, url) for url in links]
+                if return_df:
+                    if uid:
+                        return (
+                            pd.DataFrame(json_data["data"])[historical_auction_cols()],
+                            uid,
+                        )
+                    return pd.DataFrame(json_data["data"])[historical_auction_cols()]
+                if uid:
+                    return json_data["data"], uid
+                return json_data["data"]
+            except httpx.HTTPStatusError as e:
+                self._logger.debug(f"UST Prices - Bad Status: {response.status_code}")
+                if uid:
+                    return pd.DataFrame(columns=historical_auction_cols()), uid
+                return pd.DataFrame(columns=historical_auction_cols())
+            except Exception as e:
+                self._logger.debug(f"UST Prices - Error: {e}")
+                if uid:
+                    return pd.DataFrame(columns=historical_auction_cols()), uid
+                return pd.DataFrame(columns=historical_auction_cols())
+
+        tasks = [
+            fetch(
+                client=client,
+                url=url,
+                as_of_date=as_of_date,
+                return_df=return_df,
+                uid=uid,
+            )
+            for url in links
+        ]
         return tasks
 
     async def _build_fetch_tasks_historical_cusip_prices(
@@ -113,7 +200,8 @@ class CUSIP_Curve:
             uid: Optional[int | str],
         ):
             payload = build_date_payload(date)
-            logging.debug(f"UST Prices - {date} Payload: {payload}")
+            self._logger.debug(f"UST Prices - {date} Payload: {payload}")
+            cols_to_return = ["cusip", "offer_price", "bid_price", "eod_price"]
             try:
                 response = await client.post(url, data=payload, follow_redirects=True)
                 response.raise_for_status()
@@ -124,23 +212,35 @@ class CUSIP_Curve:
                         cusip for cusip in cusips if cusip not in df["CUSIP"].values
                     ]
                     if missing_cusips:
-                        logging.warning(
+                        self._logger.warning(
                             f"UST Prices Warning - The following CUSIPs are not found in the DataFrame: {missing_cusips}"
                         )
                 df = df[df["CUSIP"].isin(cusips)] if cusips else df
+                df.columns = df.columns.str.lower()
+                df = df[
+                    (df["security type"] != "TIPS")
+                    & (df["security type"] != "MARKET BASED FRN")
+                ]
+                df = df.rename(
+                    columns={
+                        "buy": "offer_price",
+                        "sell": "bid_price",
+                        "end of day": "eod_price",
+                    }
+                )
                 if uid:
-                    return date, df, uid
-                return date, df
+                    return date, df[cols_to_return], uid
+                return date, df[cols_to_return]
             except httpx.HTTPStatusError as e:
-                logging.debug(f"UST Prices - Bad Status: {response.status_code}")
+                self._logger.debug(f"UST Prices - Bad Status: {response.status_code}")
                 if uid:
-                    return date, pd.DataFrame(), uid
-                return date, pd.DataFrame()
+                    return date, pd.DataFrame(columns=cols_to_return), uid
+                return date, pd.DataFrame(columns=cols_to_return)
             except Exception as e:
-                logging.debug(f"UST Prices - Error: {e}")
+                self._logger.debug(f"UST Prices - Error: {e}")
                 if uid:
-                    return date, pd.DataFrame(), uid
-                return date, pd.DataFrame()
+                    return date, pd.DataFrame(columns=cols_to_return), uid
+                return date, pd.DataFrame(columns=cols_to_return)
 
         tasks = [
             fetch_prices_from_treasury_date_search(
@@ -180,7 +280,7 @@ class CUSIP_Curve:
                 key=lambda valid_date: abs(dt - valid_date),
             )
             valid_soma_dates_from_input[dt] = valid_closest_date
-        logging.debug(
+        self._logger.debug(
             f"SOMA Holdings - Valid SOMA Holding Dates: {valid_soma_dates_from_input}"
         )
 
@@ -189,6 +289,14 @@ class CUSIP_Curve:
             date: datetime,
             uid: Optional[str | int] = None,
         ):
+            cols_to_return = [
+                "cusip",
+                "asOfDate",
+                "parValue",
+                "percentOutstanding",
+                "changeFromPriorWeek",
+                "changeFromPriorYear",
+            ]
             try:
                 date_str = valid_soma_dates_from_input[date].strftime("%Y-%m-%d")
                 url = f"https://markets.newyorkfed.org/api/soma/tsy/get/asof/{date_str}.json"
@@ -213,28 +321,31 @@ class CUSIP_Curve:
                 curr_soma_holdings_df["percentOutstanding"] = pd.to_numeric(
                     curr_soma_holdings_df["percentOutstanding"], errors="coerce"
                 )
-                curr_soma_holdings_df["coupon"] = pd.to_numeric(
-                    curr_soma_holdings_df["coupon"], errors="coerce"
+                curr_soma_holdings_df["changeFromPriorWeek"] = pd.to_numeric(
+                    curr_soma_holdings_df["changeFromPriorWeek"], errors="coerce"
                 )
-                curr_soma_holdings_df["inflationCompensation"] = pd.to_numeric(
-                    curr_soma_holdings_df["inflationCompensation"], errors="coerce"
+                curr_soma_holdings_df["changeFromPriorYear"] = pd.to_numeric(
+                    curr_soma_holdings_df["changeFromPriorYear"], errors="coerce"
                 )
-
+                curr_soma_holdings_df = curr_soma_holdings_df[
+                    (curr_soma_holdings_df["securityType"] != "TIPS")
+                    & (curr_soma_holdings_df["securityType"] != "FRNs")
+                ]
                 if uid:
-                    return date, curr_soma_holdings_df, uid
-                return date, curr_soma_holdings_df
+                    return date, curr_soma_holdings_df[cols_to_return], uid
+                return date, curr_soma_holdings_df[cols_to_return]
 
             except httpx.HTTPStatusError as e:
-                logging.debug(f"SOMA Holding - Bad Status: {response.status_code}")
+                self._logger.debug(f"SOMA Holding - Bad Status: {response.status_code}")
                 if uid:
-                    return date, pd.DataFrame(), uid
-                return date, pd.DataFrame()
+                    return date, pd.DataFrame(columns=cols_to_return), uid
+                return date, pd.DataFrame(columns=cols_to_return)
 
             except Exception as e:
-                logging.debug(f"SOMA Holding - Error: {str(e)}")
+                self._logger.debug(f"SOMA Holding - Error: {str(e)}")
                 if uid:
-                    return date, pd.DataFrame(), uid
-                return date, pd.DataFrame()
+                    return date, pd.DataFrame(columns=cols_to_return), uid
+                return date, pd.DataFrame(columns=cols_to_return)
 
         tasks = [
             fetch_single_soma_holding_day(client=client, date=date, uid=uid)
@@ -253,19 +364,28 @@ class CUSIP_Curve:
             date: datetime,
             uid: Optional[str | int] = None,
         ):
+            cols_to_return = [
+                "cusip",
+                "outstanding_amt",
+                "portion_unstripped_amt",
+                "portion_stripped_amt",
+                "reconstituted_amt",
+            ]
             try:
                 last_n_months_last_business_days: List[datetime] = (
                     last_day_n_months_ago(date, n=2, return_all=True)
                 )
-                logging.debug(f"STRIPping - BDays: {last_n_months_last_business_days}")
+                self._logger.debug(
+                    f"STRIPping - BDays: {last_n_months_last_business_days}"
+                )
                 dates_str_query = ",".join(
                     [
                         date.strftime("%Y-%m-%d")
                         for date in last_n_months_last_business_days
                     ]
                 )
-                url = f"https://api.fiscaldata.treasury.gov/services/api/fiscal_service/v1/debt/mspd/mspd_table_5?filter=record_date:in:({dates_str_query})"
-                logging.debug(f"STRIPping - {date} url: {url}")
+                url = f"https://api.fiscaldata.treasury.gov/services/api/fiscal_service/v1/debt/mspd/mspd_table_5?filter=record_date:in:({dates_str_query})&page[number]=1&page[size]=10000"
+                self._logger.debug(f"STRIPping - {date} url: {url}")
                 response = await client.get(
                     url,
                     headers=build_treasurydirect_header(
@@ -277,6 +397,10 @@ class CUSIP_Curve:
                 curr_stripping_activity_df = pd.DataFrame(
                     curr_stripping_activity_json["data"]
                 )
+                curr_stripping_activity_df = curr_stripping_activity_df[
+                    curr_stripping_activity_df["security_class1_desc"]
+                    != "Treasury Inflation-Protected Securities"
+                ]
                 curr_stripping_activity_df["record_date"] = pd.to_datetime(
                     curr_stripping_activity_df["record_date"], errors="coerce"
                 )
@@ -284,12 +408,6 @@ class CUSIP_Curve:
                 curr_stripping_activity_df = curr_stripping_activity_df[
                     curr_stripping_activity_df["record_date"] == latest_date
                 ]
-                curr_stripping_activity_df["maturity_date"] = pd.to_datetime(
-                    curr_stripping_activity_df["maturity_date"], errors="coerce"
-                )
-                curr_stripping_activity_df["interest_rate_pct"] = pd.to_numeric(
-                    curr_stripping_activity_df["interest_rate_pct"], errors="coerce"
-                )
                 curr_stripping_activity_df["outstanding_amt"] = pd.to_numeric(
                     curr_stripping_activity_df["outstanding_amt"], errors="coerce"
                 )
@@ -300,22 +418,31 @@ class CUSIP_Curve:
                 curr_stripping_activity_df["portion_stripped_amt"] = pd.to_numeric(
                     curr_stripping_activity_df["portion_stripped_amt"], errors="coerce"
                 )
+                curr_stripping_activity_df["reconstituted_amt"] = pd.to_numeric(
+                    curr_stripping_activity_df["reconstituted_amt"], errors="coerce"
+                )
+                col1 = "cusip"
+                col2 = "security_class2_desc"
+                curr_stripping_activity_df.columns = [
+                    col2 if col == col1 else col1 if col == col2 else col
+                    for col in curr_stripping_activity_df.columns
+                ]
 
                 if uid:
-                    return date, curr_stripping_activity_df, uid
-                return date, curr_stripping_activity_df
+                    return date, curr_stripping_activity_df[cols_to_return], uid
+                return date, curr_stripping_activity_df[cols_to_return]
 
             except httpx.HTTPStatusError as e:
-                logging.debug(f"STRIPping - Bad Status: {response.status_code}")
+                self._logger.debug(f"STRIPping - Bad Status: {response.status_code}")
                 if uid:
-                    return date, pd.DataFrame(), uid
-                return date, pd.DataFrame()
+                    return date, pd.DataFrame(columns=cols_to_return), uid
+                return date, pd.DataFrame(columns=cols_to_return)
 
             except Exception as e:
-                logging.debug(f"STRIPping - Error: {str(e)}")
+                self._logger.debug(f"STRIPping - Error: {str(e)}")
                 if uid:
-                    return date, pd.DataFrame(), uid
-                return date, pd.DataFrame()
+                    return date, pd.DataFrame(columns=cols_to_return), uid
+                return date, pd.DataFrame(columns=cols_to_return)
 
         tasks = [
             fetch_mspd_table_5(client=client, date=date, uid=uid) for date in dates
@@ -371,7 +498,7 @@ class CUSIP_Curve:
                 )
             finra_cookie_str = dict(finra_cookie_response.headers)["set-cookie"]
             finra_cookie_dict = cookie_string_to_dict(cookie_string=finra_cookie_str)
-            logging.info(
+            self._logger.info(
                 f"TRACE - FINRA Cookie Fetch Took: {time.time() - finra_cookie_t1} seconds"
             )
 
@@ -475,13 +602,13 @@ class CUSIP_Curve:
                         ][0]
                         return cusip, record_total_str
                     except aiohttp.ClientResponseError:
-                        logging.debug(
+                        self._logger.debug(
                             f"TRACE - CONFIGs Bad Status: {config_response.status}"
                         )
                         return cusip, -1
 
                     except Exception as e:
-                        logging.debug(f"TRACE - CONFIGs Error : {str(e)}")
+                        self._logger.debug(f"TRACE - CONFIGs Error : {str(e)}")
                         return cusip, -1
 
                 async def build_finra_config_tasks(
@@ -526,10 +653,10 @@ class CUSIP_Curve:
             cusip_finra_api_payload_configs = get_cusips_finra_pagination_configs(
                 cusips=cusips, start_date=start_date, end_date=end_date
             )
-            logging.info(
+            self._logger.info(
                 f"TRACE - FINRA CUSIP API Payload Configs Took: {time.time() - cusip_finra_api_payload_configs_t1} seconds"
             )
-            logging.debug(
+            self._logger.debug(
                 f"TRACE - CUSIP API Payload Configs: {cusip_finra_api_payload_configs}"
             )
 
@@ -566,7 +693,7 @@ class CUSIP_Curve:
                         return cusip, df, uid
                     return cusip, df
                 except aiohttp.ClientResponseError:
-                    logging.debug(
+                    self._logger.debug(
                         f"TRACE - Trade History Bad Status: {response.status}"
                     )
                     if uid:
@@ -574,7 +701,7 @@ class CUSIP_Curve:
                     return cusip, None
 
                 except Exception as e:
-                    logging.debug(f"TRACE - Trade History Error : {str(e)}")
+                    self._logger.debug(f"TRACE - Trade History Error : {str(e)}")
                     if uid:
                         return cusip, None, uid
                     return cusip, None
@@ -583,12 +710,12 @@ class CUSIP_Curve:
             for cusip in cusips:
                 max_record_size = int(cusip_finra_api_payload_configs[cusip])
                 if max_record_size == -1:
-                    logging.debug(
+                    self._logger.debug(
                         f"TRACE - {cusip} had -1 Max Record Size - Does it Exist?"
                     )
                     continue
                 num_reqs = math.ceil(max_record_size / 5000)
-                logging.debug(f"TRACE - {cusip} Reqs: {num_reqs}") 
+                self._logger.debug(f"TRACE - {cusip} Reqs: {num_reqs}")
                 for i in range(1, num_reqs + 1):
                     curr_offset = i * 5000
                     if curr_offset > max_record_size:
@@ -637,7 +764,9 @@ class CUSIP_Curve:
         results: List[Tuple[str, pd.DataFrame]] = asyncio.run(
             run_fetch_all(start_date=start_date, end_date=end_date, cusips=cusips)
         )
-        logging.info(f"TRACE - Fetch All Took: {time.time() - fetch_all_t1} seconds")
+        self._logger.info(
+            f"TRACE - Fetch All Took: {time.time() - fetch_all_t1} seconds"
+        )
         dfs_by_key = defaultdict(list)
         for key, df in results:
             if df is None:
@@ -651,7 +780,7 @@ class CUSIP_Curve:
             .reset_index(drop=True)
             for key, dfs in dfs_by_key.items()
         }
-        logging.info(
+        self._logger.info(
             f"TRACE - DF Concation Took: {time.time() - df_concatation_t1} seconds"
         )
 
@@ -661,10 +790,83 @@ class CUSIP_Curve:
                 for key, df in concatenated_dfs.items():
                     df.to_excel(writer, sheet_name=key, index=False)
 
-            logging.info(
+            self._logger.info(
                 f"TRACE - XLSX Write Took: {time.time() - xlsx_write_t1} seconds"
             )
 
-        logging.info(f"TRACE - Total Time Elapsed: {time.time() - total_t1} seconds")
+        self._logger.info(
+            f"TRACE - Total Time Elapsed: {time.time() - total_t1} seconds"
+        )
 
         return concatenated_dfs
+
+    def build_curve_set(self, as_of_date: datetime):
+        async def gather_tasks(client: httpx.AsyncClient, as_of_date: datetime):
+            ust_historical_auction_tasks = (
+                await self._build_fetch_tasks_historical_treasury_auctions(
+                    client=client, as_of_date=as_of_date, uid="ust_auctions"
+                )
+            )
+            ust_historical_prices_tasks = (
+                await self._build_fetch_tasks_historical_cusip_prices(
+                    client=client, dates=[as_of_date], uid="ust_prices"
+                )
+            )
+            soma_holdings_tasks = (
+                await self._build_fetch_tasks_historical_soma_holdings(
+                    client=client, dates=[as_of_date], uid="soma_holdings"
+                )
+            )
+            ust_stripping_tasks = (
+                await self._build_fetch_tasks_historical_stripping_activity(
+                    client=client, dates=[as_of_date], uid="ust_stripping"
+                )
+            )
+            tasks = (
+                ust_historical_auction_tasks
+                + ust_historical_prices_tasks
+                + soma_holdings_tasks
+                + ust_stripping_tasks
+            )
+            return await asyncio.gather(*tasks)
+
+        async def run_fetch_all(as_of_date: datetime):
+            async with httpx.AsyncClient() as client:
+                all_data = await gather_tasks(client=client, as_of_date=as_of_date)
+                return all_data
+
+        results = asyncio.run(run_fetch_all(as_of_date=as_of_date))
+        auctions_dfs = []
+        dfs = []
+        for tup in results:
+            uid = tup[-1]
+            if uid == "ust_auctions":
+                auctions_dfs.append(tup[0])
+            elif (
+                uid == "ust_prices" or uid == "soma_holdings" or uid == "ust_stripping"
+            ):
+                dfs.append(tup[1])
+            else:
+                self._logger.warning(f"CURVE SET - unknown UID, Current Tuple: {tup}")
+
+        auctions_df = pd.concat(auctions_dfs)
+        merged_df = reduce(
+            lambda left, right: pd.merge(left, right, on="cusip", how="outer"), dfs
+        )
+        merged_df = pd.merge(left=auctions_df, right=merged_df, on="cusip", how="outer")
+        merged_df = merged_df[merged_df["cusip"].apply(is_valid_ust_cusip)]
+        merged_df["mid_price"] = (merged_df["offer_price"] + merged_df["bid_price"]) / 2
+
+        calculate_yields_partial = partial(calculate_yields, as_of_date=as_of_date)
+        with mp.Pool(mp.cpu_count()) as pool:
+            results = pool.map(
+                calculate_yields_partial, [row for _, row in merged_df.iterrows()]
+            )
+
+        offer_yields, bid_yields, eod_yields = zip(*results)
+        merged_df["offer_yield"] = offer_yields
+        merged_df["bid_yield"] = bid_yields
+        merged_df["eod_yield"] = eod_yields
+
+        merged_df["mid_yield"] = (merged_df["offer_yield"] + merged_df["bid_yield"]) / 2
+        return merged_df

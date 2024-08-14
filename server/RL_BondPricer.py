@@ -9,16 +9,16 @@ from pandas.tseries.offsets import BDay
 class RL_BondPricer:
 
     @staticmethod
-    def pydatetime_to_rldate(date: datetime) -> rl.dt:
+    def _pydatetime_to_rldate(date: datetime) -> rl.dt:
         return rl.dt(date.year, date.month, date.day)
 
     @staticmethod
-    def bill_price_to_ytm(
+    def _bill_price_to_ytm(
         issue_date: datetime, maturity_date: datetime, as_of: datetime, price: float
     ) -> float:
         bill_ust = rl.Bill(
-            effective=RL_BondPricer.pydatetime_to_rldate(issue_date),
-            termination=RL_BondPricer.pydatetime_to_rldate(maturity_date),
+            effective=RL_BondPricer._pydatetime_to_rldate(issue_date),
+            termination=RL_BondPricer._pydatetime_to_rldate(maturity_date),
             calendar="nyc",
             modifier="NONE",
             currency="usd",
@@ -31,7 +31,7 @@ class RL_BondPricer:
         return bill_ust.ytm(price=price, settlement=settle_pd_ts.to_pydatetime())
 
     @staticmethod
-    def coupon_bond_price_to_ytm(
+    def _coupon_bond_price_to_ytm(
         issue_date: datetime,
         maturity_date: datetime,
         as_of: datetime,
@@ -39,8 +39,8 @@ class RL_BondPricer:
         price: float,
     ) -> float:
         fxb_ust = rl.FixedRateBond(
-            effective=RL_BondPricer.pydatetime_to_rldate(issue_date),
-            termination=RL_BondPricer.pydatetime_to_rldate(maturity_date),
+            effective=RL_BondPricer._pydatetime_to_rldate(issue_date),
+            termination=RL_BondPricer._pydatetime_to_rldate(maturity_date),
             fixed_rate=coupon * 100,
             spec="ust",
         )
@@ -56,18 +56,22 @@ class RL_BondPricer:
         coupon: float,
         price: float,
     ):
-        if type == "Bill":
-            return RL_BondPricer.bill_price_to_ytm(
+        try:
+            if type == "Bill":
+                return RL_BondPricer._bill_price_to_ytm(
+                    issue_date=issue_date,
+                    maturity_date=maturity_date,
+                    as_of=as_of,
+                    price=price,
+                )
+
+            return RL_BondPricer._coupon_bond_price_to_ytm(
                 issue_date=issue_date,
                 maturity_date=maturity_date,
                 as_of=as_of,
+                coupon=coupon,
                 price=price,
             )
-
-        return RL_BondPricer.coupon_bond_price_to_ytm(
-            issue_date=issue_date,
-            maturity_date=maturity_date,
-            as_of=as_of,
-            coupon=coupon,
-            price=price,
-        )
+        except Exception as e:
+            # print(e)
+            return -1

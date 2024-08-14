@@ -303,20 +303,80 @@ def get_active_cusips(auction_json: JSON, as_of_date=datetime.today()) -> pd.Dat
     historical_auctions_df = historical_auctions_df.drop_duplicates(
         subset=["cusip"], keep="first"
     )
+    historical_auctions_df["int_rate"] = pd.to_numeric(historical_auctions_df["int_rate"], errors="coerce")
     return historical_auctions_df
 
 
-def last_day_n_months_ago(given_date: datetime, n: int = 1, return_all: bool = False) -> datetime | List[datetime]:
+def last_day_n_months_ago(
+    given_date: datetime, n: int = 1, return_all: bool = False
+) -> datetime | List[datetime]:
     if return_all:
         given_date = pd.Timestamp(given_date)
-        return [(given_date - pd.offsets.MonthEnd(i)).to_pydatetime() for i in range(1, n + 1)] 
-            
+        return [
+            (given_date - pd.offsets.MonthEnd(i)).to_pydatetime()
+            for i in range(1, n + 1)
+        ]
+
     given_date = pd.Timestamp(given_date)
     last_day = given_date - pd.offsets.MonthEnd(n)
     return last_day.to_pydatetime()
 
 
 def cookie_string_to_dict(cookie_string):
-    cookie_pairs = cookie_string.split('; ')
-    cookie_dict = {pair.split('=')[0]: pair.split('=')[1] for pair in cookie_pairs if '=' in pair}
+    cookie_pairs = cookie_string.split("; ")
+    cookie_dict = {
+        pair.split("=")[0]: pair.split("=")[1] for pair in cookie_pairs if "=" in pair
+    }
     return cookie_dict
+
+
+def is_valid_ust_cusip(potential_ust_cusip: str):
+    return len(potential_ust_cusip) == 9 and "912" in potential_ust_cusip
+
+
+def historical_auction_cols():
+    return [
+        "cusip",
+        "security_type",
+        "auction_date",
+        "issue_date",
+        "maturity_date",
+        "price_per100",
+        "allocation_pctage",
+        "avg_med_yield",
+        "bid_to_cover_ratio",
+        "comp_accepted",
+        "comp_tendered",
+        "corpus_cusip",
+        "currently_outstanding",
+        "direct_bidder_accepted",
+        "direct_bidder_tendered",
+        "est_pub_held_mat_by_type_amt",
+        "fima_included",
+        "fima_noncomp_accepted",
+        "fima_noncomp_tendered",
+        "high_discnt_rate",
+        "high_investment_rate",
+        "high_price",
+        "high_yield",
+        "indirect_bidder_accepted",
+        "indirect_bidder_tendered",
+        "int_rate",
+        "low_investment_rate",
+        "low_price",
+        "low_discnt_margin",
+        "low_yield",
+        "max_comp_award",
+        "max_noncomp_award",
+        "noncomp_accepted",
+        "noncomp_tenders_accepted",
+        "offering_amt",
+        "original_security_term",
+        "primary_dealer_accepted",
+        "primary_dealer_tendered",
+        "reopening",
+        "total_accepted",
+        "total_tendered",
+        "treas_retail_accepted",
+        "treas_retail_tenders_accepted",
+    ]
