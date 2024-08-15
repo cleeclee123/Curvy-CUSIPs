@@ -73,6 +73,9 @@ class CurveInterpolator:
         "not-a-knot", "periodic", "clamped", "natural"
     ] = "not-a-knot"
     _cubic_spline_interp_custom_knots: npt.NDArray[np.float64] = np.array([])
+    _cubic_spline_interp_nu: Literal[0, 1, 2] = 0
+
+    _bspline_k: int = 3
 
     _logger = logging.getLogger()
     _debug_verbose: bool = False
@@ -219,35 +222,10 @@ class CurveInterpolator:
     ):
         self._cubic_spline_interp_custom_knots = custom_knots
 
+    def set_cubic_spline_interpolation_nu(self, nu: int):
+        self._cubic_spline_interp_nu = nu
+
     def _cubic_spline_interpolation(self) -> np.ndarray:
-        # func_no_extrap = scipy.interpolate.CubicSpline(
-        #     self._x,
-        #     self._y,
-        #     extrapolate=False,
-        #     bc_type=self._cubic_spline_interp_bc_type,
-        # )
-        # func_extrap = scipy.interpolate.CubicSpline(
-        #     self._x,
-        #     self._y,
-        #     extrapolate=True,
-        #     bc_type=self._cubic_spline_interp_bc_type,
-        # )
-
-        # ynew_no_extrap = func_no_extrap(self._linspace_x)
-        # ynew_extrap = func_extrap(self._linspace_x)
-
-        # ynew = ynew_no_extrap.copy()
-        # if self._enable_extrapolate_left_fill:
-        #     ynew[self._linspace_x < self._x[0]] = ynew_extrap[
-        #         self._linspace_x < self._x[0]
-        #     ]
-        # if self._enable_extrapolate_right_fill:
-        #     ynew[self._linspace_x > self._x[-1]] = ynew_extrap[
-        #         self._linspace_x > self._x[-1]
-        #     ]
-
-        # return ynew
-
         all_x = np.sort(
             np.concatenate([self._x, self._cubic_spline_interp_custom_knots])
         )
@@ -255,7 +233,7 @@ class CurveInterpolator:
         spline = scipy.interpolate.CubicSpline(
             all_x, all_y, bc_type=self._cubic_spline_interp_bc_type
         )
-        ynew = spline(self._linspace_x)
+        ynew = spline(self._linspace_x, nu=self._cubic_spline_interp_nu)
 
         if self._enable_extrapolate_left_fill:
             left_indices = self._linspace_x < min(self._x)
@@ -311,21 +289,48 @@ class CurveInterpolator:
 
         return ynew
 
+    def set_b_spline_k(self, b: int):
+        self._bspline_k = b
+
+    def _b_spline_interpolation(self) -> np.ndarray:
+        spline = scipy.interpolate.make_interp_spline(
+            self._x, self._y, k=self._bspline_k
+        )
+        ynew = spline(self._linspace_x)
+
+        if self._enable_extrapolate_left_fill:
+            left_indices = self._linspace_x < self._x[0]
+            slope_left = (self._y[1] - self._y[0]) / (self._x[1] - self._x[0])
+            ynew[left_indices] = self._y[0] + slope_left * (
+                self._linspace_x[left_indices] - self._x[0]
+            )
+
+        if self._enable_extrapolate_right_fill:
+            right_indices = self._linspace_x > self._x[-1]
+            slope_right = (self._y[-1] - self._y[-2]) / (self._x[-1] - self._x[-2])
+            ynew[right_indices] = self._y[-1] + slope_right * (
+                self._linspace_x[right_indices] - self._x[-1]
+            )
+
+        return ynew
+
     def plotter(
         self,
         linear: Optional[bool] = False,
         log_linear: Optional[bool] = False,
         cubic: Optional[bool] = False,
-        cubic_bc_types_n_knots: Optional[
+        cubic_bc_types_n_knots_n_nu: Optional[
             List[
                 Tuple[
-                    Literal["not-a-knot", "periodic", "clamped", "natural"], np.ndarray
+                    Literal["not-a-knot", "periodic", "clamped", "natural"],
+                    np.ndarray,
+                    int,
                 ]
             ]
         ] = None,
         pchip: Optional[bool] = False,
         akima: Optional[bool] = False,
-        b_splines: Optional[bool] = False,
+        b_spline: Optional[bool] = False,
         run_parallel: Optional[bool] = False,
     ):
         def plot_helper(ynew: np.ndarray, title: str):
@@ -350,6 +355,9 @@ class CurveInterpolator:
             ),
             self._pchip_interpolation: "PCHIP Interpolation" if pchip else None,
             self._akima_interpolation: "Akima Interpolation" if akima else None,
+            self._b_spline_interpolation: (
+                f"B-Spline Interpolation - k = {self._bspline_k}" if b_spline else None
+            ),
         }
 
         if run_parallel:
@@ -371,10 +379,15 @@ class CurveInterpolator:
                     ynew = func()
                     plot_helper(ynew, title)
 
-        if cubic_bc_types_n_knots:
-            for bc_type, knots in cubic_bc_types_n_knots:
+        if cubic_bc_types_n_knots_n_nu:
+            for bc_type, knots, nu in cubic_bc_types_n_knots_n_nu:
+                if not knots:
+                    knots = np.array([])
+                if not nu:
+                    nu = 0
                 self.set_cubic_spline_interpolation_bc_type(bc_type=bc_type)
                 self.set_cubic_spline_interpolation_custom_knots(custom_knots=knots)
+                self.set_cubic_spline_interpolation_nu(nu=nu)
                 ynew = self._cubic_spline_interpolation()
                 title = f"Cubic Spline Interpolation - Boundary condition type: {self._cubic_spline_interp_bc_type} - Knots: {self._cubic_spline_interp_custom_knots}"
                 plot_helper(ynew, title)
