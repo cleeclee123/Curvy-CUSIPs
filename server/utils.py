@@ -211,8 +211,8 @@ def get_last_n_off_the_run_cusips(
     auctions_df["issue_date"] = pd.to_datetime(auctions_df["issue_date"])
     current_date = as_of_date
     auctions_df = auctions_df[
-        auctions_df["auction_date" if not use_issue_date else "issue_date"]
-        <= current_date
+        auctions_df["auction_date" if not use_issue_date else "issue_date"].dt.date
+        <= current_date.date()
     ]
     auctions_df = auctions_df.sort_values(
         "auction_date" if not use_issue_date else "issue_date", ascending=False
@@ -319,8 +319,8 @@ def get_active_cusips(
         ].index
     )
     historical_auctions_df = historical_auctions_df[
-        historical_auctions_df["auction_date" if not use_issue_date else "issue_date"]
-        <= as_of_date
+        historical_auctions_df["auction_date" if not use_issue_date else "issue_date"].dt.date
+        <= as_of_date.date()
     ]
     historical_auctions_df = historical_auctions_df[
         historical_auctions_df["maturity_date"] >= as_of_date

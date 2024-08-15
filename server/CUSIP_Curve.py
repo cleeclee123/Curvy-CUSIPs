@@ -6,7 +6,7 @@ import time
 from collections import defaultdict
 from datetime import datetime
 from functools import reduce, partial
-from typing import Dict, List, Optional, Tuple 
+from typing import Dict, List, Optional, Tuple
 
 import aiohttp
 import httpx
@@ -36,6 +36,7 @@ from QL_BondPricer import QL_BondPricer
 - bond price to ytm optimization
 - find other cusip historical price source
 """
+
 
 def calculate_yields(row, as_of_date, use_quantlib=False):
     if use_quantlib:
@@ -209,6 +210,21 @@ class CUSIP_Curve:
             for url in links
         ]
         return tasks
+
+    def get_auctions_df(self, as_of_date: datetime) -> pd.DataFrame:
+        async def build_tasks(client: httpx.AsyncClient, as_of_date: datetime):
+            tasks = await self._build_fetch_tasks_historical_treasury_auctions(
+                client=client, as_of_date=as_of_date
+            )
+            return await asyncio.gather(*tasks)
+
+        async def run_fetch_all(as_of_date: datetime):
+            async with httpx.AsyncClient() as client:
+                all_data = await build_tasks(client=client, as_of_date=as_of_date)
+                return all_data
+
+        dfs = asyncio.run(run_fetch_all(as_of_date=as_of_date))
+        return pd.concat(dfs)
 
     async def _build_fetch_tasks_historical_cusip_prices(
         self,
