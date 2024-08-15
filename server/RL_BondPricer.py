@@ -1,6 +1,7 @@
 from datetime import datetime
 from typing import Literal
 
+import numpy as np 
 import pandas as pd
 import rateslib as rl
 from pandas.tseries.offsets import BDay
@@ -74,4 +75,4 @@ class RL_BondPricer:
             )
         except Exception as e:
             # print(e)
-            return -1
+            return np.nan

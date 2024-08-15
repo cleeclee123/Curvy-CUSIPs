@@ -5,19 +5,15 @@ import multiprocessing as mp
 import time
 from collections import defaultdict
 from datetime import datetime
-from itertools import product
 from functools import reduce, partial
-from typing import Dict, List, Optional, Tuple, TypeAlias
+from typing import Dict, List, Optional, Tuple 
 
 import aiohttp
 import httpx
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import QuantLib as ql
 import requests
 import ujson as json
-from scipy.optimize import minimize
 
 from utils import (
     JSON,
@@ -28,10 +24,18 @@ from utils import (
     is_valid_ust_cusip,
     historical_auction_cols,
     get_last_n_off_the_run_cusips,
+    ust_labeler,
+    ust_sorter,
 )
 from RL_BondPricer import RL_BondPricer
 from QL_BondPricer import QL_BondPricer
 
+# TODO
+"""
+- timeouts and error handling after
+- bond price to ytm optimization
+- find other cusip historical price source
+"""
 
 def calculate_yields(row, as_of_date, use_quantlib=False):
     if use_quantlib:
@@ -90,10 +94,10 @@ def calculate_yields(row, as_of_date, use_quantlib=False):
 
 class CUSIP_Curve:
     _logger = logging.getLogger()
+    _use_ust_issue_date: bool = False
     _debug_verbose: bool = False
     _info_verbose: bool = False  # performance benchmarking mainly
-    _no_logs_plz: bool = (False,)
-    _use_ust_issue_date: bool = (False,)
+    _no_logs_plz: bool = False
 
     def __init__(
         self,
@@ -162,7 +166,7 @@ class CUSIP_Curve:
             try:
                 response = await client.get(url, headers=build_treasurydirect_header())
                 response.raise_for_status()
-                json_data = response.json()
+                json_data: JSON = response.json()
                 if as_of_date:
                     df = get_active_cusips(
                         auction_json=json_data["data"],
@@ -838,19 +842,21 @@ class CUSIP_Curve:
         include_auction_results: Optional[bool] = False,
         include_soma_holdings: Optional[bool] = False,
         include_stripping_activity: Optional[bool] = False,
+        auctions_df: Optional[pd.DataFrame] = None,
+        sorted: Optional[bool] = False,
     ):
         async def gather_tasks(client: httpx.AsyncClient, as_of_date: datetime):
-            ust_historical_auction_tasks = (
-                await self._build_fetch_tasks_historical_treasury_auctions(
-                    client=client, as_of_date=as_of_date, uid="ust_auctions"
-                )
-            )
             ust_historical_prices_tasks = (
                 await self._build_fetch_tasks_historical_cusip_prices(
                     client=client, dates=[as_of_date], uid="ust_prices"
                 )
             )
-            tasks = ust_historical_auction_tasks + ust_historical_prices_tasks
+            tasks = ust_historical_prices_tasks
+
+            if auctions_df is None:
+                tasks += await self._build_fetch_tasks_historical_treasury_auctions(
+                    client=client, as_of_date=as_of_date, uid="ust_auctions"
+                )
             if include_soma_holdings:
                 tasks += await self._build_fetch_tasks_historical_soma_holdings(
                     client=client, dates=[as_of_date], uid="soma_holdings"
@@ -881,7 +887,7 @@ class CUSIP_Curve:
             else:
                 self._logger.warning(f"CURVE SET - unknown UID, Current Tuple: {tup}")
 
-        auctions_df = pd.concat(auctions_dfs)
+        auctions_df = pd.concat(auctions_dfs) if auctions_df is None else auctions_df
         otr_cusips_dict = get_last_n_off_the_run_cusips(
             auctions_df=auctions_df,
             n=0,
@@ -892,6 +898,10 @@ class CUSIP_Curve:
         auctions_df["is_on_the_run"] = auctions_df["cusip"].isin(
             list(otr_cusips_dict.values())
         )
+        auctions_df["label"] = auctions_df["maturity_date"].apply(ust_labeler)
+        auctions_df["time_to_maturity"] = (
+            auctions_df["maturity_date"] - as_of_date
+        ).dt.days / 365
         if not include_auction_results:
             auctions_df = auctions_df[
                 [
@@ -900,8 +910,12 @@ class CUSIP_Curve:
                     "auction_date",
                     "issue_date",
                     "maturity_date",
+                    "time_to_maturity",
                     "int_rate",
-                    "high_investment_rate"
+                    "high_investment_rate",
+                    "is_on_the_run",
+                    "label",
+                    "original_security_term",
                 ]
             ]
         merged_df = reduce(
@@ -926,5 +940,16 @@ class CUSIP_Curve:
             merged_df["mid_yield"] = (
                 merged_df["offer_yield"] + merged_df["bid_yield"]
             ) / 2
+
+        merged_df = merged_df.replace("null", np.nan)
+        if sorted:
+            merged_df["sort_key"] = merged_df["original_security_term"].apply(
+                ust_sorter
+            )
+            merged_df = (
+                merged_df.sort_values(by=["sort_key", "maturity_date"])
+                .drop(columns="sort_key")
+                .reset_index(drop=True)
+            )
 
         return merged_df

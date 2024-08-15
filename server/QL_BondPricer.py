@@ -1,6 +1,7 @@
 from datetime import datetime
 from typing import Literal
 
+import numpy as np
 import pandas as pd
 import QuantLib as ql
 
@@ -120,4 +121,4 @@ class QL_BondPricer:
                 price=price,
             )
         except:
-            return -1
+            return np.nan

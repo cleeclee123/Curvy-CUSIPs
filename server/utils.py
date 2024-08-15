@@ -408,3 +408,21 @@ def historical_auction_cols():
         "treas_retail_accepted",
         "treas_retail_tenders_accepted",
     ]
+
+
+def ust_labeler(mat_date: datetime | pd.Timestamp):
+    return mat_date.strftime('%b %y') + "s"
+
+
+def ust_sorter(term: str):
+    if " " in term:
+        term = term.split(" ")[0]
+    num, unit = term.split('-')
+    num = int(num)
+    unit_multiplier = {
+        'Year': 365,
+        'Month': 30,
+        'Week': 7,
+        'Day': 1
+    }
+    return num * unit_multiplier[unit]
