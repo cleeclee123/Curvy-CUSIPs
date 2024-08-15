@@ -33,33 +33,57 @@ from RL_BondPricer import RL_BondPricer
 from QL_BondPricer import QL_BondPricer
 
 
-def calculate_yields(row, as_of_date):
-    offer_yield = RL_BondPricer.bond_price_to_ytm(
-        type=row["security_type"],
-        issue_date=row["issue_date"],
-        maturity_date=row["maturity_date"],
-        as_of=as_of_date,
-        coupon=row["int_rate"] / 100,
-        price=row["offer_price"],
-    )
-
-    bid_yield = RL_BondPricer.bond_price_to_ytm(
-        type=row["security_type"],
-        issue_date=row["issue_date"],
-        maturity_date=row["maturity_date"],
-        as_of=as_of_date,
-        coupon=row["int_rate"] / 100,
-        price=row["bid_price"],
-    )
-
-    eod_yield = RL_BondPricer.bond_price_to_ytm(
-        type=row["security_type"],
-        issue_date=row["issue_date"],
-        maturity_date=row["maturity_date"],
-        as_of=as_of_date,
-        coupon=row["int_rate"] / 100,
-        price=row["eod_price"],
-    )
+def calculate_yields(row, as_of_date, use_quantlib=False):
+    if use_quantlib:
+        offer_yield = QL_BondPricer.bond_price_to_ytm(
+            type=row["security_type"],
+            issue_date=row["issue_date"],
+            maturity_date=row["maturity_date"],
+            as_of=as_of_date,
+            coupon=row["int_rate"] / 100,
+            price=row["offer_price"],
+        )
+        bid_yield = QL_BondPricer.bond_price_to_ytm(
+            type=row["security_type"],
+            issue_date=row["issue_date"],
+            maturity_date=row["maturity_date"],
+            as_of=as_of_date,
+            coupon=row["int_rate"] / 100,
+            price=row["bid_price"],
+        )
+        eod_yield = QL_BondPricer.bond_price_to_ytm(
+            type=row["security_type"],
+            issue_date=row["issue_date"],
+            maturity_date=row["maturity_date"],
+            as_of=as_of_date,
+            coupon=row["int_rate"] / 100,
+            price=row["eod_price"],
+        )
+    else:
+        offer_yield = RL_BondPricer.bond_price_to_ytm(
+            type=row["security_type"],
+            issue_date=row["issue_date"],
+            maturity_date=row["maturity_date"],
+            as_of=as_of_date,
+            coupon=row["int_rate"] / 100,
+            price=row["offer_price"],
+        )
+        bid_yield = RL_BondPricer.bond_price_to_ytm(
+            type=row["security_type"],
+            issue_date=row["issue_date"],
+            maturity_date=row["maturity_date"],
+            as_of=as_of_date,
+            coupon=row["int_rate"] / 100,
+            price=row["bid_price"],
+        )
+        eod_yield = RL_BondPricer.bond_price_to_ytm(
+            type=row["security_type"],
+            issue_date=row["issue_date"],
+            maturity_date=row["maturity_date"],
+            as_of=as_of_date,
+            coupon=row["int_rate"] / 100,
+            price=row["eod_price"],
+        )
 
     return offer_yield, bid_yield, eod_yield
 
@@ -69,7 +93,7 @@ class CUSIP_Curve:
     _debug_verbose: bool = False
     _info_verbose: bool = False  # performance benchmarking mainly
     _no_logs_plz: bool = (False,)
-    _use_ust_issue_date: bool = False,
+    _use_ust_issue_date: bool = (False,)
 
     def __init__(
         self,
@@ -806,7 +830,15 @@ class CUSIP_Curve:
 
         return concatenated_dfs
 
-    def build_curve_set(self, as_of_date: datetime, calc_ytms: Optional[bool] = True):
+    def build_curve_set(
+        self,
+        as_of_date: datetime,
+        calc_ytms: Optional[bool] = True,
+        use_quantlib: Optional[bool] = False,  # default is rateslib
+        include_auction_results: Optional[bool] = False,
+        include_soma_holdings: Optional[bool] = False,
+        include_stripping_activity: Optional[bool] = False,
+    ):
         async def gather_tasks(client: httpx.AsyncClient, as_of_date: datetime):
             ust_historical_auction_tasks = (
                 await self._build_fetch_tasks_historical_treasury_auctions(
@@ -818,22 +850,16 @@ class CUSIP_Curve:
                     client=client, dates=[as_of_date], uid="ust_prices"
                 )
             )
-            soma_holdings_tasks = (
-                await self._build_fetch_tasks_historical_soma_holdings(
+            tasks = ust_historical_auction_tasks + ust_historical_prices_tasks
+            if include_soma_holdings:
+                tasks += await self._build_fetch_tasks_historical_soma_holdings(
                     client=client, dates=[as_of_date], uid="soma_holdings"
                 )
-            )
-            ust_stripping_tasks = (
-                await self._build_fetch_tasks_historical_stripping_activity(
+            if include_stripping_activity:
+                tasks += await self._build_fetch_tasks_historical_stripping_activity(
                     client=client, dates=[as_of_date], uid="ust_stripping"
                 )
-            )
-            tasks = (
-                ust_historical_auction_tasks
-                + ust_historical_prices_tasks
-                + soma_holdings_tasks
-                + ust_stripping_tasks
-            )
+
             return await asyncio.gather(*tasks)
 
         async def run_fetch_all(as_of_date: datetime):
@@ -866,6 +892,18 @@ class CUSIP_Curve:
         auctions_df["is_on_the_run"] = auctions_df["cusip"].isin(
             list(otr_cusips_dict.values())
         )
+        if not include_auction_results:
+            auctions_df = auctions_df[
+                [
+                    "cusip",
+                    "security_type",
+                    "auction_date",
+                    "issue_date",
+                    "maturity_date",
+                    "int_rate",
+                    "high_investment_rate"
+                ]
+            ]
         merged_df = reduce(
             lambda left, right: pd.merge(left, right, on="cusip", how="outer"), dfs
         )
@@ -874,7 +912,9 @@ class CUSIP_Curve:
         merged_df["mid_price"] = (merged_df["offer_price"] + merged_df["bid_price"]) / 2
 
         if calc_ytms:
-            calculate_yields_partial = partial(calculate_yields, as_of_date=as_of_date)
+            calculate_yields_partial = partial(
+                calculate_yields, as_of_date=as_of_date, use_quantlib=use_quantlib
+            )
             with mp.Pool(mp.cpu_count()) as pool:
                 results = pool.map(
                     calculate_yields_partial, [row for _, row in merged_df.iterrows()]
@@ -883,6 +923,8 @@ class CUSIP_Curve:
             merged_df["offer_yield"] = offer_yields
             merged_df["bid_yield"] = bid_yields
             merged_df["eod_yield"] = eod_yields
-            merged_df["mid_yield"] = (merged_df["offer_yield"] + merged_df["bid_yield"]) / 2
-        
+            merged_df["mid_yield"] = (
+                merged_df["offer_yield"] + merged_df["bid_yield"]
+            ) / 2
+
         return merged_df
