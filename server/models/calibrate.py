@@ -6,9 +6,10 @@ See `calibrate_ns_ols` and `calibrate_nss_ols` for ordinary least squares
 (OLS) based methods.
 """
 
-from typing import Tuple, Any, List
+from typing import Tuple, Any, List, Optional
 
 import numpy as np
+import numpy.typing as npt
 from numpy.linalg import lstsq
 from scipy.optimize import minimize
 
@@ -17,6 +18,7 @@ from models.NelsonSiegelSvensson import NelsonSiegelSvenssonCurve
 from models.BjorkChristensen import BjorkChristensenCurve
 from models.BjorkChristensenAugmented import BjorkChristensenAugmentedCurve
 from models.DieboldLi import DieboldLiCurve
+from models.MLESM import MerrillLynchExponentialSplineModel
 
 
 def _assert_same_shape(t: np.ndarray, y: np.ndarray) -> None:
@@ -141,11 +143,11 @@ def calibrate_bc_ols(
 
 
 def calibrate_bc_augmented_ols(
-    maturities: List[float], yields: List[float]
+    maturities: npt.NDArray[np.float64], yields: npt.NDArray[np.float64]
 ) -> Tuple[BjorkChristensenAugmentedCurve, Any]:
     """Fit the Bjork-Christensen Augmented model to the given yields."""
 
-    def objective(params: List[float]) -> float:
+    def objective(params: npt.NDArray[np.float64]) -> float:
         beta0, beta1, beta2, beta3, beta4, tau = params
         curve = BjorkChristensenAugmentedCurve(beta0, beta1, beta2, beta3, beta4, tau)
         model_yields = curve(np.array(maturities))
@@ -169,14 +171,14 @@ def calibrate_bc_augmented_ols(
 
 
 def calibrate_diebold_li_ols(
-    maturities: List[float], yields: List[float]
+    maturities: npt.NDArray[np.float64], yields: npt.NDArray[np.float64]
 ) -> Tuple[DieboldLiCurve, Any]:
     """Fit the Diebold-Li model to the given yields."""
     # Initial guesses for beta0, beta1, beta2, and lambda_
     initial_guess = [np.mean(yields), -0.02, 0.02, 0.1]
 
     # Objective function to minimize (sum of squared errors)
-    def objective(params: List[float]) -> float:
+    def objective(params: npt.NDArray[np.float64]) -> float:
         curve = DieboldLiCurve(params[0], params[1], params[2], params[3])
         return np.sum((curve(np.array(maturities)) - np.array(yields)) ** 2)
 
@@ -186,4 +188,46 @@ def calibrate_diebold_li_ols(
     # Extract the optimized parameters and create the calibrated yield curve model
     optimized_params = result.x
     curve = DieboldLiCurve(*optimized_params)
+    return curve, result
+
+
+def calibrate_mles_ols(
+    maturities: npt.NDArray[np.float64],
+    yields: npt.NDArray[np.float64],
+    N: int = 8,
+    regularization: float = 1e-4,
+    overnight_rate: Optional[float] = None,
+) -> Tuple[MerrillLynchExponentialSplineModel, Any]:
+    if maturities[0] != 0:
+        short_rate = overnight_rate or yields[0]
+        maturities = np.insert(maturities, 0, 0)
+        yields = np.insert(yields, 0, short_rate)
+
+    """Fit the MLES model to the given yields using OLS."""
+    initial_guess = [0.1] + [1.0] * N
+
+    def objective(params: npt.NDArray[np.float64]) -> float:
+        alpha = params[0]
+        lambda_hat = np.array(params[1:])
+        curve = MerrillLynchExponentialSplineModel(alpha, N, lambda_hat)
+        curve.fit(np.array(maturities), np.array(yields), np.eye(len(maturities)))
+
+        theoretical_yields = curve.theoretical_yields(np.array(maturities))
+
+        # Regularization to penalize large gradients (especially at the front end)
+        regularization_term = regularization * np.sum(np.diff(lambda_hat) ** 2)
+
+        return (
+            np.sum((theoretical_yields - np.array(yields)) ** 2) + regularization_term
+        )
+
+    # Optimize alpha and lambda_hat
+    result = minimize(objective, initial_guess, method="Nelder-Mead")
+
+    optimized_params = result.x
+    optimized_alpha = optimized_params[0]
+    optimized_lambda_hat = np.array(optimized_params[1:])
+    curve = MerrillLynchExponentialSplineModel(optimized_alpha, N, optimized_lambda_hat)
+    curve.fit(np.array(maturities), np.array(yields), np.eye(len(maturities)))
+
     return curve, result

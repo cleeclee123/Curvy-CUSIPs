@@ -31,13 +31,6 @@ import logging
 import scipy.interpolate
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from nelson_siegel_svensson.calibrate import (
-    calibrate_ns_ols,
-    calibrate_nss_ols,
-    errorfn_ns_ols,
-    errorfn_nss_ols,
-)
-
 
 class CurveInterpolator:
     # all have to exist in curve_set
@@ -372,6 +365,26 @@ class CurveInterpolator:
 
         return ynew
 
+    def _ppoly_interpolation(self) -> np.ndarray:
+        coeffs = scipy.interpolate.CubicSpline(self._x, self._y).c
+        ppoly = scipy.interpolate.PPoly(coeffs, self._x)
+
+        ynew_no_extrap = ppoly(self._linspace_x)
+        ynew = ynew_no_extrap.copy()
+
+        if self._enable_extrapolate_left_fill:
+            left_extrap_values = ppoly(self._linspace_x[self._linspace_x < self._x[0]])
+            ynew[self._linspace_x < self._x[0]] = left_extrap_values
+
+        if self._enable_extrapolate_right_fill:
+            right_extrap_values = ppoly(
+                self._linspace_x[self._linspace_x > self._x[-1]]
+            )
+            ynew[self._linspace_x > self._x[-1]] = right_extrap_values
+
+        return ynew
+
+
     def plotter(
         self,
         linear: Optional[bool] = False,
@@ -390,6 +403,7 @@ class CurveInterpolator:
         pchip: Optional[bool] = False,
         akima: Optional[bool] = False,
         b_spline: Optional[bool] = False,
+        ppoly: Optional[bool] = False,
         run_parallel: Optional[bool] = False,
     ):
         def plot_helper(ynew: np.ndarray, title: str):
@@ -413,15 +427,16 @@ class CurveInterpolator:
                 else None
             ),
             self._cubic_hermite_interpolation: (
-                f"Cubic Hermite Spline Interpolation"
-                if cubic_hermite 
-                else None
+                f"Cubic Hermite Spline Interpolation" if cubic_hermite else None
             ),
-            self._pchip_interpolation: "PCHIP (Monotonic & Hermite Cubic) Interpolation" if pchip else None,
+            self._pchip_interpolation: (
+                "PCHIP (Monotonic & Hermite Cubic) Interpolation" if pchip else None
+            ),
             self._akima_interpolation: "Akima Interpolation" if akima else None,
             self._b_spline_interpolation: (
                 f"B-Spline Interpolation - k = {self._bspline_k}" if b_spline else None
             ),
+            self._ppoly_interpolation: (f"PPoly Interpolation" if ppoly else None),
         }
 
         if run_parallel:
