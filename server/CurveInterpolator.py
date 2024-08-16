@@ -1,20 +1,13 @@
 """
 interpolations:
-- linear, log line, Polynomials
 - Cosine
 - Chebyshev 
 - Orthogonal polynomials
 - Monomial interpolation
-- cubics spline (normal, montone, hermite, bessel, log)
-- BSplines
-- PCHIP
-- hagan west monotone convex
-- ns, nss
-- Vasicek-Fong
-- Diebold-Li 
+- Vasicek
+- Fong-Vasicek (implemented MLESM which was inspired by )
 - Cox-Ingersoll-Ross 
-- Björk-Christensen
-- Smith_Wilson
+- Smith-Wilson
 - gaussian process regression interpolation
 - Gaussian Mixture Models (GMM)
 - Principal Component Regression (PCR)

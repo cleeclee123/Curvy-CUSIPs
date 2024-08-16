@@ -1,24 +1,19 @@
 # adapted from https://github.com/luphord/nelson_siegel_svensson/blob/master/nelson_siegel_svensson/calibrate.py
 # -*- coding: utf-8 -*-
 
-"""Calibration methods for Nelson-Siegel(-Svensson) Models.
-See `calibrate_ns_ols` and `calibrate_nss_ols` for ordinary least squares
-(OLS) based methods.
-"""
-
-from typing import Tuple, Any, List, Optional
+from typing import Any, Optional, Tuple
 
 import numpy as np
 import numpy.typing as npt
-from numpy.linalg import lstsq
-from scipy.optimize import minimize
-
-from models.NelsonSiegel import NelsonSiegelCurve
-from models.NelsonSiegelSvensson import NelsonSiegelSvenssonCurve
 from models.BjorkChristensen import BjorkChristensenCurve
 from models.BjorkChristensenAugmented import BjorkChristensenAugmentedCurve
 from models.DieboldLi import DieboldLiCurve
 from models.MLESM import MerrillLynchExponentialSplineModel
+from models.NelsonSiegel import NelsonSiegelCurve
+from models.NelsonSiegelSvensson import NelsonSiegelSvenssonCurve
+from models.SmithWilson import SmithWilsonCurve, find_ufr_ytm
+from numpy.linalg import lstsq
+from scipy.optimize import OptimizeResult, minimize
 
 
 def _assert_same_shape(t: np.ndarray, y: np.ndarray) -> None:
@@ -222,7 +217,7 @@ def calibrate_mles_ols(
         )
 
     # Optimize alpha and lambda_hat
-    result = minimize(objective, initial_guess, method="Nelder-Mead")
+    result = minimize(objective, initial_guess, method="BFGS")
 
     optimized_params = result.x
     optimized_alpha = optimized_params[0]
@@ -231,3 +226,35 @@ def calibrate_mles_ols(
     curve.fit(np.array(maturities), np.array(yields), np.eye(len(maturities)))
 
     return curve, result
+
+
+def calibrate_smith_wilson_ols(
+    maturities: npt.NDArray[np.float64],
+    yields: npt.NDArray[np.float64],
+    ufr: Optional[float] = None,
+    alpha_initial: float = 0.1,
+    overnight_rate: Optional[float] = None,
+) -> Tuple[MerrillLynchExponentialSplineModel, Any]:
+    if maturities[0] != 0:
+        short_rate = overnight_rate or yields[0]
+        maturities = np.insert(maturities, 0, 1 / 365)
+        yields = np.insert(yields, 0, short_rate)
+
+    if not ufr:
+        ufr = find_ufr_ytm(maturities=maturities, ytms=yields)
+
+    def objective(alpha: float) -> float:
+        curve = SmithWilsonCurve(ufr, alpha)
+        curve.fit(yields, maturities)
+        fitted_yields = curve(maturities)
+        return np.sum((fitted_yields - yields) ** 2)
+
+    result = minimize(
+        objective, x0=alpha_initial, bounds=[(0.01, 1.0)], method="L-BFGS-B"
+    )
+
+    optimal_alpha = result.x[0]
+    calibrated_curve = SmithWilsonCurve(ufr, optimal_alpha)
+    calibrated_curve.fit(yields, maturities)
+
+    return calibrated_curve, result
