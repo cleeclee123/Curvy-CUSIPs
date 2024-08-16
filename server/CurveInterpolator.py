@@ -11,8 +11,10 @@ interpolations:
 - hagan west monotone convex
 - ns, nss
 - Vasicek-Fong
+- Diebold-Li 
 - Cox-Ingersoll-Ross 
 - Björk-Christensen
+- Smith_Wilson
 - gaussian process regression interpolation
 - Gaussian Mixture Models (GMM)
 - Principal Component Regression (PCR)
@@ -28,6 +30,13 @@ from typing import Literal, Optional, Dict, Callable, List, Tuple
 import logging
 import scipy.interpolate
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+from nelson_siegel_svensson.calibrate import (
+    calibrate_ns_ols,
+    calibrate_nss_ols,
+    errorfn_ns_ols,
+    errorfn_nss_ols,
+)
 
 
 class CurveInterpolator:

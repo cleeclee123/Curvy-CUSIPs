@@ -27,8 +27,8 @@ from utils import (
     ust_labeler,
     ust_sorter,
 )
-from RL_BondPricer import RL_BondPricer
-from QL_BondPricer import QL_BondPricer
+from models.RL_BondPricer import RL_BondPricer
+from models.QL_BondPricer import QL_BondPricer
 
 # TODO
 """
