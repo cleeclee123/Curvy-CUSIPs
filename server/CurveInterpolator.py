@@ -258,6 +258,55 @@ class CurveInterpolator:
 
         return ynew
 
+    def _calculate_derivatives(self) -> np.ndarray:
+        """Calculate derivatives at each point using finite differences."""
+        dydx = np.zeros_like(self._y)
+        n = len(self._x)
+
+        # For the first point, use forward difference
+        dydx[0] = (self._y[1] - self._y[0]) / (self._x[1] - self._x[0])
+
+        # For the last point, use backward difference
+        dydx[-1] = (self._y[-1] - self._y[-2]) / (self._x[-1] - self._x[-2])
+
+        # For the interior points, use central difference
+        for i in range(1, n - 1):
+            dydx[i] = (self._y[i + 1] - self._y[i - 1]) / (
+                self._x[i + 1] - self._x[i - 1]
+            )
+
+        return dydx
+
+    # what the Office of Debt Management at Department of the Treasury uses for par curve build
+    # https://home.treasury.gov/quasi-cubic-hermite-spline-treasury-yield-curve-methodology
+    def _cubic_hermite_interpolation(self) -> np.ndarray:
+        self._dydx = self._calculate_derivatives()
+        func_no_extrap = scipy.interpolate.CubicHermiteSpline(
+            self._x, self._y, self._dydx
+        )
+
+        ynew_no_extrap = func_no_extrap(self._linspace_x)
+
+        ynew = ynew_no_extrap.copy()
+        if self._enable_extrapolate_left_fill:
+            left_extrap_values = (
+                self._dydx[0]
+                * (self._linspace_x[self._linspace_x < self._x[0]] - self._x[0])
+                + self._y[0]
+            )
+            ynew[self._linspace_x < self._x[0]] = left_extrap_values
+
+        if self._enable_extrapolate_right_fill:
+            right_extrap_values = (
+                self._dydx[-1]
+                * (self._linspace_x[self._linspace_x > self._x[-1]] - self._x[-1])
+                + self._y[-1]
+            )
+            ynew[self._linspace_x > self._x[-1]] = right_extrap_values
+
+        return ynew
+
+    # monotonic cubic interpolation
     def _pchip_interpolation(self) -> np.ndarray:
         func_no_extrap = scipy.interpolate.PchipInterpolator(
             self._x, self._y, extrapolate=False
@@ -328,6 +377,7 @@ class CurveInterpolator:
         linear: Optional[bool] = False,
         log_linear: Optional[bool] = False,
         cubic: Optional[bool] = False,
+        cubic_hermite: Optional[bool] = False,
         cubic_bc_types_n_knots_n_nu: Optional[
             List[
                 Tuple[
@@ -362,7 +412,12 @@ class CurveInterpolator:
                 if cubic
                 else None
             ),
-            self._pchip_interpolation: "PCHIP Interpolation" if pchip else None,
+            self._cubic_hermite_interpolation: (
+                f"Cubic Hermite Spline Interpolation"
+                if cubic_hermite 
+                else None
+            ),
+            self._pchip_interpolation: "PCHIP (Monotonic & Hermite Cubic) Interpolation" if pchip else None,
             self._akima_interpolation: "Akima Interpolation" if akima else None,
             self._b_spline_interpolation: (
                 f"B-Spline Interpolation - k = {self._bspline_k}" if b_spline else None
