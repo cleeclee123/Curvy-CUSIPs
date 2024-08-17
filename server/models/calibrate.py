@@ -148,7 +148,6 @@ def calibrate_bc_augmented_ols(
         model_yields = curve(np.array(maturities))
         return np.sum((model_yields - np.array(yields)) ** 2)
 
-    # Initial guess for the parameters
     initial_params = [0.01, 0.01, 0.01, 0.01, 0.01, 1.0]
     bounds = [
         (0, None),
@@ -172,15 +171,12 @@ def calibrate_diebold_li_ols(
     # Initial guesses for beta0, beta1, beta2, and lambda_
     initial_guess = [np.mean(yields), -0.02, 0.02, 0.1]
 
-    # Objective function to minimize (sum of squared errors)
     def objective(params: npt.NDArray[np.float64]) -> float:
         curve = DieboldLiCurve(params[0], params[1], params[2], params[3])
         return np.sum((curve(np.array(maturities)) - np.array(yields)) ** 2)
 
-    # Use scipy's optimization routine to minimize the objective function
     result = minimize(objective, initial_guess, method="BFGS")
 
-    # Extract the optimized parameters and create the calibrated yield curve model
     optimized_params = result.x
     curve = DieboldLiCurve(*optimized_params)
     return curve, result

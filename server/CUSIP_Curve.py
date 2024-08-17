@@ -15,7 +15,7 @@ import pandas as pd
 import requests
 import ujson as json
 
-from utils import (
+from server.utils.utils import (
     JSON,
     build_treasurydirect_header,
     cookie_string_to_dict,
@@ -27,8 +27,8 @@ from utils import (
     ust_labeler,
     ust_sorter,
 )
-from models.RL_BondPricer import RL_BondPricer
-from models.QL_BondPricer import QL_BondPricer
+from server.utils.RL_BondPricer import RL_BondPricer
+from server.utils.QL_BondPricer import QL_BondPricer
 
 # TODO
 """
