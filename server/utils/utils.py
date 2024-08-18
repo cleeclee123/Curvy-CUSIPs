@@ -1,22 +1,20 @@
-import pandas as pd
-import aiohttp
 import asyncio
-import os
-import requests
 import math
+import os
 import shutil
-import QuantLib as ql
-import numpy as np
-import matplotlib.pyplot as plt
-from scipy.optimize import minimize
 from datetime import datetime
 from itertools import product
-from typing import TypeAlias, Optional, List, Dict, Literal
+from typing import Dict, List, Literal, Optional, TypeAlias
+
+import aiohttp
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import QuantLib as ql
+import requests
+from scipy.optimize import minimize
 
 JSON: TypeAlias = dict[str, "JSON"] | list["JSON"] | str | int | float | bool | None
-
-
-
 
 
 # n == 0 => On-the-runs
