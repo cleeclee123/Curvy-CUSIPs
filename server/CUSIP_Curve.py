@@ -3,10 +3,12 @@ import logging
 import math
 import multiprocessing as mp
 import time
+import warnings
 from collections import defaultdict
 from datetime import datetime
-from functools import reduce, partial
+from functools import partial, reduce
 from typing import Dict, List, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor
 
 import aiohttp
 import httpx
@@ -15,26 +17,31 @@ import pandas as pd
 import requests
 import ujson as json
 
+from server.utils.QL_BondPricer import QL_BondPricer
+from server.utils.RL_BondPricer import RL_BondPricer
 from server.utils.utils import (
     JSON,
     build_treasurydirect_header,
     cookie_string_to_dict,
     get_active_cusips,
-    last_day_n_months_ago,
-    is_valid_ust_cusip,
-    historical_auction_cols,
+    get_historical_on_the_run_cusips,
     get_last_n_off_the_run_cusips,
+    historical_auction_cols,
+    is_valid_ust_cusip,
+    last_day_n_months_ago,
     ust_labeler,
     ust_sorter,
 )
-from server.utils.RL_BondPricer import RL_BondPricer
-from server.utils.QL_BondPricer import QL_BondPricer
+
+warnings.filterwarnings("ignore", category=pd.errors.SettingWithCopyWarning)
+warnings.simplefilter(action="ignore", category=FutureWarning)
 
 # TODO
 """
 - timeouts and error handling after
 - bond price to ytm optimization
 - find other cusip historical price source
+- histroical auctions df as a private member
 """
 
 
@@ -94,30 +101,56 @@ def calculate_yields(row, as_of_date, use_quantlib=False):
 
 
 class CUSIP_Curve:
-    _logger = logging.getLogger()
     _use_ust_issue_date: bool = False
+    _global_timeout: int = 10
+
+    _logger = logging.getLogger(__name__)
     _debug_verbose: bool = False
+    _error_verbose: bool = False
     _info_verbose: bool = False  # performance benchmarking mainly
     _no_logs_plz: bool = False
 
     def __init__(
         self,
+        use_ust_issue_date: Optional[bool] = False,
+        global_timeout: int = 10,
         debug_verbose: Optional[bool] = False,
         info_verbose: Optional[bool] = False,
-        no_logs_plz: Optional[bool] = False,  # temp
-        use_ust_issue_date: Optional[bool] = False,
+        error_verbose: Optional[bool] = False,
+        no_logs_plz: Optional[bool] = False,
     ):
+        self._use_ust_issue_date = use_ust_issue_date
+        self._global_timeout = global_timeout
+
         self._debug_verbose = debug_verbose
+        self._error_verbose = error_verbose
         self._info_verbose = info_verbose
         self._no_logs_plz = no_logs_plz
-        self._use_ust_issue_date = use_ust_issue_date
+
+        if not self._logger.hasHandlers():
+            handler = logging.StreamHandler()
+            handler.setFormatter(
+                logging.Formatter(
+                    "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+                )
+            )
+            self._logger.addHandler(handler)
+
         if self._debug_verbose:
-            self._logger.setLevel(self._logger.DEBUG)
-        if self._info_verbose:
-            self._logger.setLevel(self._logger.INFO)
+            self._logger.setLevel(logging.DEBUG)
+        elif self._info_verbose:
+            self._logger.setLevel(logging.INFO)
+        elif self._error_verbose:
+            self._logger.setLevel(logging.ERROR)
+        else:
+            self._logger.setLevel(logging.WARNING)
+
         if self._no_logs_plz:
             self._logger.disabled = True
             self._logger.propagate = False
+
+        if self._debug_verbose or self._info_verbose or self._error_verbose:
+            self._logger.setLevel(logging.DEBUG)
 
     async def _build_fetch_tasks_historical_treasury_auctions(
         self,
@@ -224,7 +257,127 @@ class CUSIP_Curve:
                 return all_data
 
         dfs = asyncio.run(run_fetch_all(as_of_date=as_of_date))
-        return pd.concat(dfs)
+        auctions_df: pd.DataFrame = pd.concat(dfs)
+        auctions_df = auctions_df.sort_values(by=["auction_date"], ascending=False)
+        return auctions_df
+
+    async def _fetch_prices_from_treasury_date_search(
+        self,
+        client: httpx.AsyncClient,
+        date: datetime,
+        cusips: List[str],
+        uid: Optional[int | str],
+        max_retries: Optional[int] = 3,
+        backoff_factor: Optional[int] = 1,
+    ):
+        payload = {
+            "priceDate.month": date.month,
+            "priceDate.day": date.day,
+            "priceDate.year": date.year,
+            "submit": "Show Prices",
+        }
+        headers = {
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+            "Accept-Encoding": "gzip, deflate, br, zstd",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Cache-Control": "max-age=0",
+            "Connection": "keep-alive",
+            # "Content-Length": "100",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Dnt": "1",
+            "Host": "savingsbonds.gov",
+            "Origin": "https://savingsbonds.gov",
+            "Referer": "https://savingsbonds.gov/GA-FI/FedInvest/selectSecurityPriceDate",
+            "Sec-Ch-Ua": '"Google Chrome";v="125", "Chromium";v="125", "Not.A/Brand";v="24"',
+            "Sec-Ch-Ua-Mobile": "?0",
+            "Sec-Ch-Ua-Platform": '"Windows"',
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "same-origin",
+            "Sec-Fetch-User": "?1",
+            "Upgrade-Insecure-Requests": "1",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        }
+        self._logger.debug(f"UST Prices - {date} Payload: {payload}")
+        cols_to_return = ["cusip", "offer_price", "bid_price", "eod_price"]
+        retries = 0
+        try:
+            while retries < max_retries:
+                try:
+                    url = "https://savingsbonds.gov/GA-FI/FedInvest/selectSecurityPriceDate"
+                    response = await client.post(
+                        url,
+                        data=payload,
+                        headers=headers,
+                        follow_redirects=False,
+                        timeout=self._global_timeout,
+                    )
+                    if response.is_redirect:
+                        redirect_url = response.headers.get("Location")
+                        self._logger.debug(
+                            f"UST Prices - {date} Redirecting to {redirect_url}"
+                        )
+                        response = await client.get(redirect_url)
+
+                    response.raise_for_status()
+                    tables = pd.read_html(response.content, header=0)
+                    df = tables[0]
+                    if cusips:
+                        missing_cusips = [
+                            cusip for cusip in cusips if cusip not in df["CUSIP"].values
+                        ]
+                        if missing_cusips:
+                            self._logger.warning(
+                                f"UST Prices Warning - The following CUSIPs are not found in the DataFrame: {missing_cusips}"
+                            )
+                    df = df[df["CUSIP"].isin(cusips)] if cusips else df
+                    df.columns = df.columns.str.lower()
+                    df = df.query("`security type` not in ['TIPS', 'MARKET BASED FRN']")
+                    df = df.rename(
+                        columns={
+                            "buy": "offer_price",
+                            "sell": "bid_price",
+                            "end of day": "eod_price",
+                        }
+                    )
+                    if uid:
+                        return date, df[cols_to_return], uid
+                    return date, df[cols_to_return]
+
+                except httpx.HTTPStatusError as e:
+                    self._logger.error(
+                        f"UST Prices - Bad Status for {date}: {response.status_code}"
+                    )
+                    if response.status_code == 404:
+                        if uid:
+                            return date, df[cols_to_return], uid
+                        return date, df[cols_to_return]
+                    retries += 1
+                    wait_time = backoff_factor * (2 ** (retries - 1))
+                    self._logger.debug(
+                        f"UST Prices - Throttled. Waiting for {wait_time} seconds before retrying..."
+                    )
+                    await asyncio.sleep(wait_time)
+
+                except Exception as e:
+                    self._logger.error(f"UST Prices - Error for {date}: {e}")
+                    retries += 1
+                    wait_time = backoff_factor * (2 ** (retries - 1))
+                    self._logger.debug(
+                        f"UST Prices - Throttled. Waiting for {wait_time} seconds before retrying..."
+                    )
+                    await asyncio.sleep(wait_time)
+
+            raise ValueError(f"UST Prices - Max retries exceeded for {date}")
+        except Exception as e:
+            self._logger.error(e)
+            if uid:
+                return date, pd.DataFrame(columns=cols_to_return), uid
+            return date, pd.DataFrame(columns=cols_to_return)
+
+    async def _fetch_prices_with_semaphore(self, semaphore, *args, **kwargs):
+        async with semaphore:
+            return await self._fetch_prices_from_treasury_date_search(*args, **kwargs)
 
     async def _build_fetch_tasks_historical_cusip_prices(
         self,
@@ -232,68 +385,12 @@ class CUSIP_Curve:
         dates: List[datetime],
         cusips: Optional[List[str]] = None,
         uid: Optional[str | int] = None,
+        max_concurrent_tasks: int = 100,
     ):
-        url = "https://savingsbonds.gov/GA-FI/FedInvest/selectSecurityPriceDate"
-
-        def build_date_payload(date: datetime):
-            return {
-                "priceDate.month": date.month,
-                "priceDate.day": date.day,
-                "priceDate.year": date.year,
-                "submit": "Show Prices",
-            }
-
-        async def fetch_prices_from_treasury_date_search(
-            client: httpx.AsyncClient,
-            date: datetime,
-            cusips: List[str],
-            uid: Optional[int | str],
-        ):
-            payload = build_date_payload(date)
-            self._logger.debug(f"UST Prices - {date} Payload: {payload}")
-            cols_to_return = ["cusip", "offer_price", "bid_price", "eod_price"]
-            try:
-                response = await client.post(url, data=payload, follow_redirects=True)
-                response.raise_for_status()
-                tables = pd.read_html(response.content)
-                df = tables[0]
-                if cusips:
-                    missing_cusips = [
-                        cusip for cusip in cusips if cusip not in df["CUSIP"].values
-                    ]
-                    if missing_cusips:
-                        self._logger.warning(
-                            f"UST Prices Warning - The following CUSIPs are not found in the DataFrame: {missing_cusips}"
-                        )
-                df = df[df["CUSIP"].isin(cusips)] if cusips else df
-                df.columns = df.columns.str.lower()
-                df = df[
-                    (df["security type"] != "TIPS")
-                    & (df["security type"] != "MARKET BASED FRN")
-                ]
-                df = df.rename(
-                    columns={
-                        "buy": "offer_price",
-                        "sell": "bid_price",
-                        "end of day": "eod_price",
-                    }
-                )
-                if uid:
-                    return date, df[cols_to_return], uid
-                return date, df[cols_to_return]
-            except httpx.HTTPStatusError as e:
-                self._logger.debug(f"UST Prices - Bad Status: {response.status_code}")
-                if uid:
-                    return date, pd.DataFrame(columns=cols_to_return), uid
-                return date, pd.DataFrame(columns=cols_to_return)
-            except Exception as e:
-                self._logger.debug(f"UST Prices - Error: {e}")
-                if uid:
-                    return date, pd.DataFrame(columns=cols_to_return), uid
-                return date, pd.DataFrame(columns=cols_to_return)
-
+        semaphore = asyncio.Semaphore(max_concurrent_tasks)
         tasks = [
-            fetch_prices_from_treasury_date_search(
+            self._fetch_prices_with_semaphore(
+                semaphore,
                 client=client,
                 date=date,
                 cusips=cusips,
@@ -302,6 +399,125 @@ class CUSIP_Curve:
             for date in dates
         ]
         return tasks
+    
+    async def _fetch_ust_prices_from_github(
+        self,
+        client: httpx.AsyncClient,
+        date: datetime,
+        cusips: Optional[List[str]] = None,
+        uid: Optional[str | int] = None,
+        max_retries: Optional[int] = 3,
+        backoff_factor: Optional[int] = 1,
+    ):
+        headers = {
+            "authority": "raw.githubusercontent.com",
+            "method": "GET",
+            "path": f"/cleeclee123/CUSIP-Set/main/{date.strftime("%Y-%m-%d")}.json",
+            "scheme": "https",
+            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+            "accept-encoding": "gzip, deflate, br, zstd",
+            "accept-language": "en-US,en;q=0.9",
+            "cache-control": "no-cache",
+            "dnt": "1",
+            "pragma": "no-cache",
+            "priority": "u=0, i",
+            "sec-ch-ua": '"Not)A;Brand";v="99", "Google Chrome";v="127", "Chromium";v="127"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "sec-fetch-dest": "document",
+            "sec-fetch-mode": "navigate",
+            "sec-fetch-site": "none",
+            "sec-fetch-user": "?1",
+            "upgrade-insecure-requests": "1",
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
+        }
+        url = f"https://raw.githubusercontent.com/cleeclee123/CUSIP-Set/main/{date.strftime("%Y-%m-%d")}.json"
+        cols_to_return = ["cusip", "offer_price", "bid_price", "eod_price"]
+        retries = 0
+        try:
+            while retries < max_retries:
+                try:
+                    response = await client.get(url, headers=headers)
+                    response.raise_for_status()
+                    res_json = response.json()
+                    df = pd.DataFrame(res_json["data"])
+                    if cusips:
+                        missing_cusips = [
+                            cusip for cusip in cusips if cusip not in df["CUSIP"].values
+                        ]
+                        if missing_cusips:
+                            self._logger.warning(
+                                f"UST Prices Warning - The following CUSIPs are not found in the DataFrame: {missing_cusips}"
+                            )
+                    df = df[df["CUSIP"].isin(cusips)] if cusips else df
+                    if uid:
+                        return date, df[cols_to_return], uid
+                    return date, df[cols_to_return]
+
+                except httpx.HTTPStatusError as e:
+                    self._logger.error(f"UST Prices GitHub - Error for {date}: {e}")
+                    if response.status_code == 404:
+                        if uid:
+                            return date, df[cols_to_return], uid
+                        return date, df[cols_to_return]
+                    retries += 1
+                    wait_time = backoff_factor * (2 ** (retries - 1))
+                    self._logger.debug(
+                        f"UST Prices GitHub - Throttled. Waiting for {wait_time} seconds before retrying..."
+                    )
+                    await asyncio.sleep(wait_time)
+                except Exception as e:
+                    self._logger.error(f"UST Prices GitHub - Error for {date}: {e}")
+                    retries += 1
+                    wait_time = backoff_factor * (2 ** (retries - 1))
+                    self._logger.debug(
+                        f"UST Prices GitHub - Throttled. Waiting for {wait_time} seconds before retrying..."
+                    )
+                    await asyncio.sleep(wait_time)
+            
+            raise ValueError(f"UST Prices - Max retries exceeded for {date}")
+        
+        except Exception as e:        
+            self._logger.error(e)
+            if uid:
+                return date, pd.DataFrame(columns=cols_to_return), uid
+            return date, pd.DataFrame(columns=cols_to_return)
+
+    async def _fetch_ust_prices_from_github_with_semaphore(self, semaphore, *args, **kwargs):
+        async with semaphore:
+            return await self._fetch_ust_prices_from_github(*args, **kwargs)
+    
+    async def _build_fetch_tasks_historical_cusip_prices_github(
+        self,
+        client: httpx.AsyncClient,
+        dates: List[datetime],
+        cusips: Optional[List[str]] = None,
+        uid: Optional[str | int] = None,
+        max_concurrent_tasks: int = 100,
+    ):
+        semaphore = asyncio.Semaphore(max_concurrent_tasks)
+        tasks = [
+            self._fetch_ust_prices_from_github_with_semaphore(
+                semaphore,
+                client=client,
+                date=date,
+                cusips=cusips,
+                uid=uid,
+            )
+            for date in dates
+        ]
+        return tasks
+
+    # TODO
+    def get_historical_cts(
+        self,
+        start_date: datetime,
+        end_date: datetime,
+        auctions_df: pd.DataFrame,
+        use_bid_side=False,
+        use_offer_side=False,
+    ):
+        pass
 
     async def _build_fetch_tasks_historical_soma_holdings(
         self,
@@ -386,13 +602,13 @@ class CUSIP_Curve:
                 return date, curr_soma_holdings_df[cols_to_return]
 
             except httpx.HTTPStatusError as e:
-                self._logger.debug(f"SOMA Holding - Bad Status: {response.status_code}")
+                self._logger.error(f"SOMA Holding - Bad Status: {response.status_code}")
                 if uid:
                     return date, pd.DataFrame(columns=cols_to_return), uid
                 return date, pd.DataFrame(columns=cols_to_return)
 
             except Exception as e:
-                self._logger.debug(f"SOMA Holding - Error: {str(e)}")
+                self._logger.error(f"SOMA Holding - Error: {str(e)}")
                 if uid:
                     return date, pd.DataFrame(columns=cols_to_return), uid
                 return date, pd.DataFrame(columns=cols_to_return)
@@ -483,13 +699,13 @@ class CUSIP_Curve:
                 return date, curr_stripping_activity_df[cols_to_return]
 
             except httpx.HTTPStatusError as e:
-                self._logger.debug(f"STRIPping - Bad Status: {response.status_code}")
+                self._logger.error(f"STRIPping - Bad Status: {response.status_code}")
                 if uid:
                     return date, pd.DataFrame(columns=cols_to_return), uid
                 return date, pd.DataFrame(columns=cols_to_return)
 
             except Exception as e:
-                self._logger.debug(f"STRIPping - Error: {str(e)}")
+                self._logger.error(f"STRIPping - Error: {str(e)}")
                 if uid:
                     return date, pd.DataFrame(columns=cols_to_return), uid
                 return date, pd.DataFrame(columns=cols_to_return)
@@ -652,13 +868,13 @@ class CUSIP_Curve:
                         ][0]
                         return cusip, record_total_str
                     except aiohttp.ClientResponseError:
-                        self._logger.debug(
+                        self._logger.error(
                             f"TRACE - CONFIGs Bad Status: {config_response.status}"
                         )
                         return cusip, -1
 
                     except Exception as e:
-                        self._logger.debug(f"TRACE - CONFIGs Error : {str(e)}")
+                        self._logger.error(f"TRACE - CONFIGs Error : {str(e)}")
                         return cusip, -1
 
                 async def build_finra_config_tasks(
@@ -743,7 +959,7 @@ class CUSIP_Curve:
                         return cusip, df, uid
                     return cusip, df
                 except aiohttp.ClientResponseError:
-                    self._logger.debug(
+                    self._logger.error(
                         f"TRACE - Trade History Bad Status: {response.status}"
                     )
                     if uid:
@@ -751,7 +967,7 @@ class CUSIP_Curve:
                     return cusip, None
 
                 except Exception as e:
-                    self._logger.debug(f"TRACE - Trade History Error : {str(e)}")
+                    self._logger.error(f"TRACE - Trade History Error : {str(e)}")
                     if uid:
                         return cusip, None, uid
                     return cusip, None
@@ -860,10 +1076,16 @@ class CUSIP_Curve:
         include_stripping_activity: Optional[bool] = False,
         auctions_df: Optional[pd.DataFrame] = None,
         sorted: Optional[bool] = False,
+        clean_auctions_df: Optional[bool] = False,
+        use_github: Optional[bool] = False,
     ):
         async def gather_tasks(client: httpx.AsyncClient, as_of_date: datetime):
             ust_historical_prices_tasks = (
                 await self._build_fetch_tasks_historical_cusip_prices(
+                    client=client, dates=[as_of_date], uid="ust_prices"
+                )
+            ) if not use_github else (
+                await self._build_fetch_tasks_historical_cusip_prices_github(
                     client=client, dates=[as_of_date], uid="ust_prices"
                 )
             )
@@ -885,7 +1107,8 @@ class CUSIP_Curve:
             return await asyncio.gather(*tasks)
 
         async def run_fetch_all(as_of_date: datetime):
-            async with httpx.AsyncClient() as client:
+            limits = httpx.Limits(max_connections=10)
+            async with httpx.AsyncClient(limits=limits) as client:
                 all_data = await gather_tasks(client=client, as_of_date=as_of_date)
                 return all_data
 
@@ -904,6 +1127,8 @@ class CUSIP_Curve:
                 self._logger.warning(f"CURVE SET - unknown UID, Current Tuple: {tup}")
 
         auctions_df = pd.concat(auctions_dfs) if auctions_df is None else auctions_df
+        if clean_auctions_df:
+            auctions_df
         otr_cusips_dict = get_last_n_off_the_run_cusips(
             auctions_df=auctions_df,
             n=0,

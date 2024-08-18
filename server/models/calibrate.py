@@ -5,13 +5,15 @@ from typing import Any, Optional, Tuple
 
 import numpy as np
 import numpy.typing as npt
-from models.BjorkChristensen import BjorkChristensenCurve
-from models.BjorkChristensenAugmented import BjorkChristensenAugmentedCurve
-from models.DieboldLi import DieboldLiCurve
-from models.MLESM import MerrillLynchExponentialSplineModel
-from models.NelsonSiegel import NelsonSiegelCurve
-from models.NelsonSiegelSvensson import NelsonSiegelSvenssonCurve
-from models.SmithWilson import SmithWilsonCurve, find_ufr_ytm
+import pandas as pd
+from server.models.BjorkChristensen import BjorkChristensenCurve
+from server.models.BjorkChristensenAugmented import BjorkChristensenAugmentedCurve
+from server.models.DieboldLi import DieboldLiCurve
+from server.models.MLESM import MerrillLynchExponentialSplineModel
+from server.models.NelsonSiegel import NelsonSiegelCurve
+from server.models.NelsonSiegelSvensson import NelsonSiegelSvenssonCurve
+from server.models.PCA import PCACurve
+from server.models.SmithWilson import SmithWilsonCurve, find_ufr_ytm
 from numpy.linalg import lstsq
 from scipy.optimize import OptimizeResult, minimize
 
@@ -254,3 +256,13 @@ def calibrate_smith_wilson_ols(
     calibrated_curve.fit(yields, maturities)
 
     return calibrated_curve, result
+
+
+def calibrate_pca_yield_curve(
+    historical_df: pd.DataFrame, n_components: int = 3, use_changes: bool = False
+) -> Tuple[PCACurve, Any]:
+    if use_changes:
+        historical_df = historical_df.diff().dropna()
+    pca_model = PCACurve(n_components=n_components)
+    pca_model.fit(historical_df)
+    return pca_model, pca_model.explained_variance

@@ -283,6 +283,51 @@ def get_last_n_off_the_run_cusips(
     return wrapper
 
 
+def get_historical_on_the_run_cusips(
+    auctions_df: pd.DataFrame,
+    as_of_date=datetime.today(),
+    use_issue_date=False,
+) -> pd.DataFrame:
+
+    current_date = as_of_date
+    auctions_df = auctions_df[
+        auctions_df["auction_date" if not use_issue_date else "issue_date"].dt.date
+        <= current_date.date()
+    ]
+    auctions_df = auctions_df.sort_values(
+        "auction_date" if not use_issue_date else "issue_date", ascending=False
+    )
+
+    mapping = {
+        "17-Week": 0.25,
+        "26-Week": 0.5,
+        "52-Week": 1,
+        "2-Year": 2,
+        "3-Year": 3,
+        "5-Year": 5,
+        "7-Year": 7,
+        "10-Year": 10,
+        "20-Year": 20,
+        "30-Year": 30,
+    }
+
+    on_the_run_df = auctions_df.groupby("original_security_term").first().reset_index()
+    on_the_run_filtered_df = on_the_run_df[
+        [
+            "original_security_term",
+            "security_type",
+            "cusip",
+            "auction_date",
+            "issue_date",
+        ]
+    ]
+    on_the_run_filtered_df["target_tenor"] = on_the_run_filtered_df[
+        "original_security_term"
+    ].replace(mapping)
+
+    return on_the_run_filtered_df
+
+
 def get_active_cusips(
     auction_json: Optional[JSON] = None,
     historical_auctions_df: Optional[pd.DataFrame] = None,
@@ -304,6 +349,20 @@ def get_active_cusips(
     historical_auctions_df["auction_date"] = pd.to_datetime(
         historical_auctions_df["auction_date"]
     )
+
+    historical_auctions_df.loc[
+        historical_auctions_df["original_security_term"].str.contains(
+            "29-Year", case=False, na=False
+        ),
+        "original_security_term",
+    ] = "30-Year"
+    historical_auctions_df.loc[
+        historical_auctions_df["original_security_term"].str.contains(
+            "30-", case=False, na=False
+        ),
+        "original_security_term",
+    ] = "30-Year"
+
     historical_auctions_df = historical_auctions_df[
         (historical_auctions_df["security_type"] == "Bill")
         | (historical_auctions_df["security_type"] == "Note")
@@ -319,7 +378,9 @@ def get_active_cusips(
         ].index
     )
     historical_auctions_df = historical_auctions_df[
-        historical_auctions_df["auction_date" if not use_issue_date else "issue_date"].dt.date
+        historical_auctions_df[
+            "auction_date" if not use_issue_date else "issue_date"
+        ].dt.date
         <= as_of_date.date()
     ]
     historical_auctions_df = historical_auctions_df[
@@ -411,18 +472,13 @@ def historical_auction_cols():
 
 
 def ust_labeler(mat_date: datetime | pd.Timestamp):
-    return mat_date.strftime('%b %y') + "s"
+    return mat_date.strftime("%b %y") + "s"
 
 
 def ust_sorter(term: str):
     if " " in term:
         term = term.split(" ")[0]
-    num, unit = term.split('-')
+    num, unit = term.split("-")
     num = int(num)
-    unit_multiplier = {
-        'Year': 365,
-        'Month': 30,
-        'Week': 7,
-        'Day': 1
-    }
+    unit_multiplier = {"Year": 365, "Month": 30, "Week": 7, "Day": 1}
     return num * unit_multiplier[unit]
