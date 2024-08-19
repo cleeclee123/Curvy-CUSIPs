@@ -399,6 +399,30 @@ class CUSIP_Curve:
         ]
         return tasks
 
+    def github_headers(self, path: str):
+        return {
+            "authority": "raw.githubusercontent.com",
+            "method": "GET",
+            "path": path,
+            "scheme": "https",
+            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+            "accept-encoding": "gzip, deflate, br, zstd",
+            "accept-language": "en-US,en;q=0.9",
+            "cache-control": "no-cache",
+            "dnt": "1",
+            "pragma": "no-cache",
+            "priority": "u=0, i",
+            "sec-ch-ua": '"Not)A;Brand";v="99", "Google Chrome";v="127", "Chromium";v="127"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "sec-fetch-dest": "document",
+            "sec-fetch-mode": "navigate",
+            "sec-fetch-site": "none",
+            "sec-fetch-user": "?1",
+            "upgrade-insecure-requests": "1",
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
+        }
+
     async def _fetch_ust_prices_from_github(
         self,
         client: httpx.AsyncClient,
@@ -419,28 +443,9 @@ class CUSIP_Curve:
         set_cusips_as_index: Optional[bool] = False,
     ):
         date_str = date.strftime("%Y-%m-%d")
-        headers = {
-            "authority": "raw.githubusercontent.com",
-            "method": "GET",
-            "path": f"/cleeclee123/CUSIP-Set/main/{date_str}.json",
-            "scheme": "https",
-            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-            "accept-encoding": "gzip, deflate, br, zstd",
-            "accept-language": "en-US,en;q=0.9",
-            "cache-control": "no-cache",
-            "dnt": "1",
-            "pragma": "no-cache",
-            "priority": "u=0, i",
-            "sec-ch-ua": '"Not)A;Brand";v="99", "Google Chrome";v="127", "Chromium";v="127"',
-            "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": '"Windows"',
-            "sec-fetch-dest": "document",
-            "sec-fetch-mode": "navigate",
-            "sec-fetch-site": "none",
-            "sec-fetch-user": "?1",
-            "upgrade-insecure-requests": "1",
-            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
-        }
+        headers = self.github_headers(
+            path=f"/cleeclee123/CUSIP-Set/main/{date_str}.json"
+        )
         url = f"https://raw.githubusercontent.com/cleeclee123/CUSIP-Set/main/{date_str}.json"
         retries = 0
         cols_to_return_copy = cols_to_return.copy()
@@ -601,9 +606,8 @@ class CUSIP_Curve:
             return await asyncio.gather(*tasks)
 
         async def run_fetch_all(dates: List[datetime]):
-            max_connections = len(dates)
             limits = httpx.Limits(
-                max_connections=max_connections,
+                max_connections=max_concurrent_tasks,
                 max_keepalive_connections=max_keepalive_connections,
             )
             async with httpx.AsyncClient(limits=limits) as client:
@@ -630,7 +634,7 @@ class CUSIP_Curve:
         }
         combined_df = pd.concat(results_dict).reset_index()
         final_df = combined_df.pivot(
-            index="level_0", columns="cusip", values="bid_yield"
+            index="level_0", columns="cusip", values=cols_to_return[1]
         )
         final_df = final_df.rename_axis("Date").reset_index()
         final_df.columns.name = None
@@ -652,6 +656,120 @@ class CUSIP_Curve:
             final_df.columns, key=lambda col: mapping.get(col, float("inf"))
         )
         return final_df[cols_sorted]
+
+    async def _fetch_single_ust_timeseries_github(
+        self,
+        client: httpx.AsyncClient,
+        cusip: str,
+        start_date: datetime,
+        end_date: datetime,
+        uid: Optional[str | int] = None,
+        max_retries: Optional[int] = 3,
+        backoff_factor: Optional[int] = 1,
+    ):
+        retries = 0
+        try:
+            while retries < max_retries:
+                url = f"https://raw.githubusercontent.com/cleeclee123/CUSIP-Timeseries/main/{cusip}.json"
+                headers = self.github_headers(
+                    path=f"/cleeclee123/CUSIP-Timeseries/main/{cusip}.json"
+                )
+                try:
+                    response = await client.get(url, headers=headers)
+                    response.raise_for_status()
+                    response_json = response.json()
+                    df = pd.DataFrame(response_json)
+                    df["Date"] = pd.to_datetime(df["Date"])
+                    df = df.sort_values(by="Date")
+                    df = df[df["Date"].dt.date >= start_date.date()]
+                    df = df[df["Date"].dt.date <= end_date.date()]
+                    if uid:
+                        return cusip, df, uid
+                    return cusip, df
+
+                except httpx.HTTPStatusError as e:
+                    self._logger.error(
+                        f"UST Timeseries GitHub - Error for {cusip}: {e}"
+                    )
+                    if response.status_code == 404:
+                        if uid:
+                            return cusip, None, uid
+                        return cusip, None
+                    retries += 1
+                    wait_time = backoff_factor * (2 ** (retries - 1))
+                    self._logger.debug(
+                        f"UST Timeseries GitHub - Throttled for {cusip}. Waiting for {wait_time} seconds before retrying..."
+                    )
+                    await asyncio.sleep(wait_time)
+                except Exception as e:
+                    self._logger.error(
+                        f"UST Timeseries GitHub - Error for {cusip}: {e}"
+                    )
+                    retries += 1
+                    wait_time = backoff_factor * (2 ** (retries - 1))
+                    self._logger.debug(
+                        f"UST Timeseries GitHub - Throttled for {cusip}. Waiting for {wait_time} seconds before retrying..."
+                    )
+                    await asyncio.sleep(wait_time)
+
+            raise ValueError(
+                f"UST Timeseries GitHub - Max retries exceeded for {cusip}"
+            )
+
+        except Exception as e:
+            self._logger.error(e)
+            if uid:
+                return cusip, None, uid
+            return cusip, None
+
+    async def _fetch_ust_timeseries_github_with_semaphore(
+        self, semaphore, *args, **kwargs
+    ):
+        async with semaphore:
+            return await self._fetch_single_ust_timeseries_github(*args, **kwargs)
+
+    def cusips_timeseries(
+        self,
+        start_date: datetime,
+        end_date: datetime,
+        cusips: List[str],
+        max_concurrent_tasks: int = 64,
+        max_keepalive_connections: int = 5,
+    ):
+        async def build_tasks(
+            client: httpx.AsyncClient,
+            cusips: List[str],
+        ):
+            tasks = []
+            semaphore = asyncio.Semaphore(max_concurrent_tasks)
+            for cusip in cusips:
+                task = self._fetch_ust_timeseries_github_with_semaphore(
+                    semaphore=semaphore,
+                    client=client,
+                    start_date=start_date,
+                    end_date=end_date,
+                    cusip=cusip,
+                )
+                tasks.append(task)
+
+            return await asyncio.gather(*tasks)
+
+        async def run_fetch_all(cusips: List[str]):
+            limits = httpx.Limits(
+                max_connections=max_concurrent_tasks,
+                max_keepalive_connections=max_keepalive_connections,
+            )
+            async with httpx.AsyncClient(limits=limits) as client:
+                all_data = await build_tasks(client=client, cusips=cusips)
+                return all_data
+
+        results: List[Tuple[str, pd.DataFrame]] = asyncio.run(
+            run_fetch_all(cusips=cusips)
+        )
+        results_dict: Dict[str, pd.DataFrame] = {
+            dt: df for dt, df in results if dt is not None and df is not None
+        }
+        return results_dict
 
     # TODO
     def get_historical_par_yields():
@@ -1219,7 +1337,7 @@ class CUSIP_Curve:
     ):
         if use_github:
             calc_ytms = False
-            
+
         async def gather_tasks(client: httpx.AsyncClient, as_of_date: datetime):
             ust_historical_prices_tasks = (
                 (
@@ -1318,10 +1436,14 @@ class CUSIP_Curve:
         merged_df = pd.merge(left=auctions_df, right=merged_df, on="cusip", how="outer")
         merged_df = merged_df[merged_df["cusip"].apply(is_valid_ust_cusip)]
         if not use_github:
-            merged_df["mid_price"] = (merged_df["offer_price"] + merged_df["bid_price"]) / 2
+            merged_df["mid_price"] = (
+                merged_df["offer_price"] + merged_df["bid_price"]
+            ) / 2
         else:
-            merged_df["mid_yield"] = (merged_df["offer_yield"] + merged_df["bid_yield"]) / 2
-            
+            merged_df["mid_yield"] = (
+                merged_df["offer_yield"] + merged_df["bid_yield"]
+            ) / 2
+
         if calc_ytms:
             calculate_yields_partial = partial(
                 calculate_yields, as_of_date=as_of_date, use_quantlib=use_quantlib
