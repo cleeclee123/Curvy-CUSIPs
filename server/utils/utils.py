@@ -17,6 +17,36 @@ from scipy.optimize import minimize
 JSON: TypeAlias = dict[str, "JSON"] | list["JSON"] | str | int | float | bool | None
 
 
+def build_treasurydirect_header(
+    host_str: Optional[str] = "api.fiscaldata.treasury.gov",
+    cookie_str: Optional[str] = None,
+    origin_str: Optional[str] = None,
+    referer_str: Optional[str] = None,
+):
+    return {
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7,application/json",
+        "Accept-Encoding": "gzip, deflate, br, zstd",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "Cookie": cookie_str or "",
+        "DNT": "1",
+        "Host": host_str or "",
+        "Origin": origin_str or "",
+        "Referer": referer_str or "",
+        "Pragma": "no-cache",
+        "Sec-CH-UA": '"Not)A;Brand";v="99", "Google Chrome";v="127", "Chromium";v="127"',
+        "Sec-CH-UA-Mobile": "?0",
+        "Sec-CH-UA-Platform": '"Windows"',
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
+    }
+
+
 # n == 0 => On-the-runs
 def get_last_n_off_the_run_cusips(
     auction_json: Optional[JSON] = None,
@@ -136,6 +166,9 @@ def get_historical_on_the_run_cusips(
     auctions_df = auctions_df[
         auctions_df["auction_date" if not use_issue_date else "issue_date"].dt.date
         <= current_date.date()
+    ]
+    auctions_df = auctions_df[
+        auctions_df["maturity_date"].dt.date >= current_date.date() 
     ]
     auctions_df = auctions_df.sort_values(
         "auction_date" if not use_issue_date else "issue_date", ascending=False
@@ -302,6 +335,7 @@ def historical_auction_cols():
         "noncomp_accepted",
         "noncomp_tenders_accepted",
         "offering_amt",
+        "security_term",
         "original_security_term",
         "security_term_week_year",
         "primary_dealer_accepted",

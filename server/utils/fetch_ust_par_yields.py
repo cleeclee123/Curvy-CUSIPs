@@ -2,7 +2,7 @@ import asyncio
 import http
 import os
 import shutil
-from typing import Dict, List, Optional, TypeAlias
+from typing import Dict, List, TypeAlias
 
 import aiohttp
 import pandas as pd
@@ -10,34 +10,42 @@ import pandas as pd
 JSON: TypeAlias = dict[str, "JSON"] | list["JSON"] | str | int | float | bool | None
 
 
-def build_treasurydirect_header(
-    host_str: Optional[str] = "api.fiscaldata.treasury.gov",
-    cookie_str: Optional[str] = None,
-    origin_str: Optional[str] = None,
-    referer_str: Optional[str] = None,
-):
-    return {
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7,application/json",
-        "Accept-Encoding": "gzip, deflate, br, zstd",
+def get_treasurygov_header(year: int, cj: http.cookies = None) -> Dict[str, str]:
+    cookie_str = ""
+    if cj:
+        cookies = {
+            cookie.name: cookie.value
+            for cookie in cj
+            if "home.treasury.gov" in cookie.domain
+        }
+        cookie_str = "; ".join([f"{key}={value}" for key, value in cookies.items()])
+
+    headers = {
+        "authority": "home.treasury.gov",
+        "method": "GET",
+        "path": f"/resource-center/data-chart-center/interest-rates/TextView?type=daily_treasury_yield_curve&field_tdr_date_value={year}",
+        "scheme": "https",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        "Accept-Encoding": "gzip, deflate, br",
         "Accept-Language": "en-US,en;q=0.9",
-        "Cache-Control": "no-cache",
-        "Connection": "keep-alive",
-        "Cookie": cookie_str or "",
-        "DNT": "1",
-        "Host": host_str or "",
-        "Origin": origin_str or "",
-        "Referer": referer_str or "",
-        "Pragma": "no-cache",
-        "Sec-CH-UA": '"Not)A;Brand";v="99", "Google Chrome";v="127", "Chromium";v="127"',
-        "Sec-CH-UA-Mobile": "?0",
-        "Sec-CH-UA-Platform": '"Windows"',
+        "Cache-Control": "max-age=0",
+        "Cookie": cookie_str,
+        "Dnt": "1",
+        "Sec-Ch-Ua": '"Chromium";v="116", "Not)A;Brand";v="24", "Google Chrome";v="116"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": "Windows",
         "Sec-Fetch-Dest": "document",
         "Sec-Fetch-Mode": "navigate",
         "Sec-Fetch-Site": "none",
         "Sec-Fetch-User": "?1",
         "Upgrade-Insecure-Requests": "1",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36",
     }
+
+    if cookie_str == "":
+        del headers["Cookie"]
+
+    return headers
 
 
 def multi_download_year_treasury_par_yield_curve_rate(
@@ -45,6 +53,7 @@ def multi_download_year_treasury_par_yield_curve_rate(
     raw_path: str,
     download=False,
     real_par_yields=False,
+    cj: http.cookies = None,
     run_all=False,
     verbose=False,
 ) -> pd.DataFrame:
@@ -52,7 +61,7 @@ def multi_download_year_treasury_par_yield_curve_rate(
         session: aiohttp.ClientSession, url: str, curr_year: int
     ) -> pd.DataFrame:
         try:
-            headers = build_treasurydirect_header()
+            headers = get_treasurygov_header(curr_year, cj)
             treasurygov_data_type = "".join(url.split("?type=")[1].split("&field")[0])
             full_file_path = os.path.join(
                 raw_path, "temp", f"{treasurygov_data_type}.csv"
