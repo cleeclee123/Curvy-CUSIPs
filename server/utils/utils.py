@@ -2,9 +2,10 @@ import asyncio
 import math
 import os
 import shutil
-from datetime import datetime
+from datetime import datetime, timedelta
 from itertools import product
-from typing import Dict, List, Literal, Optional, TypeAlias
+from typing import Dict, List, Literal, Optional, TypeAlias, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import aiohttp
 import matplotlib.pyplot as plt
@@ -15,6 +16,39 @@ import requests
 from scipy.optimize import minimize
 
 JSON: TypeAlias = dict[str, "JSON"] | list["JSON"] | str | int | float | bool | None
+
+
+def auction_df_filterer(historical_auctions_df: pd.DataFrame):
+    historical_auctions_df["issue_date"] = pd.to_datetime(
+        historical_auctions_df["issue_date"]
+    )
+    historical_auctions_df["maturity_date"] = pd.to_datetime(
+        historical_auctions_df["maturity_date"]
+    )
+    historical_auctions_df["auction_date"] = pd.to_datetime(
+        historical_auctions_df["auction_date"]
+    )
+
+    historical_auctions_df.loc[
+        historical_auctions_df["original_security_term"].str.contains(
+            "29-Year", case=False, na=False
+        ),
+        "original_security_term",
+    ] = "30-Year"
+    historical_auctions_df.loc[
+        historical_auctions_df["original_security_term"].str.contains(
+            "30-", case=False, na=False
+        ),
+        "original_security_term",
+    ] = "30-Year"
+
+    historical_auctions_df = historical_auctions_df[
+        (historical_auctions_df["security_type"] == "Bill")
+        | (historical_auctions_df["security_type"] == "Note")
+        | (historical_auctions_df["security_type"] == "Bond")
+    ]
+
+    return historical_auctions_df
 
 
 def build_treasurydirect_header(
@@ -168,7 +202,7 @@ def get_historical_on_the_run_cusips(
         <= current_date.date()
     ]
     auctions_df = auctions_df[
-        auctions_df["maturity_date"].dt.date >= current_date.date() 
+        auctions_df["maturity_date"].dt.date >= current_date.date()
     ]
     auctions_df = auctions_df.sort_values(
         "auction_date" if not use_issue_date else "issue_date", ascending=False
@@ -216,43 +250,7 @@ def get_active_cusips(
     if auction_json and historical_auctions_df is None:
         historical_auctions_df = pd.DataFrame(auction_json)
 
-    historical_auctions_df["issue_date"] = pd.to_datetime(
-        historical_auctions_df["issue_date"]
-    )
-    historical_auctions_df["maturity_date"] = pd.to_datetime(
-        historical_auctions_df["maturity_date"]
-    )
-    historical_auctions_df["auction_date"] = pd.to_datetime(
-        historical_auctions_df["auction_date"]
-    )
-
-    historical_auctions_df.loc[
-        historical_auctions_df["original_security_term"].str.contains(
-            "29-Year", case=False, na=False
-        ),
-        "original_security_term",
-    ] = "30-Year"
-    historical_auctions_df.loc[
-        historical_auctions_df["original_security_term"].str.contains(
-            "30-", case=False, na=False
-        ),
-        "original_security_term",
-    ] = "30-Year"
-
-    historical_auctions_df = historical_auctions_df[
-        (historical_auctions_df["security_type"] == "Bill")
-        | (historical_auctions_df["security_type"] == "Note")
-        | (historical_auctions_df["security_type"] == "Bond")
-    ]
-    historical_auctions_df = historical_auctions_df.drop(
-        historical_auctions_df[
-            (historical_auctions_df["security_type"] == "Bill")
-            & (
-                historical_auctions_df["original_security_term"]
-                != historical_auctions_df["security_term"]
-            )
-        ].index
-    )
+    historical_auctions_df = auction_df_filterer(historical_auctions_df)
     historical_auctions_df = historical_auctions_df[
         historical_auctions_df[
             "auction_date" if not use_issue_date else "issue_date"
@@ -359,3 +357,88 @@ def ust_sorter(term: str):
     num = int(num)
     unit_multiplier = {"Year": 365, "Month": 30, "Week": 7, "Day": 1}
     return num * unit_multiplier[unit]
+
+def get_otr_cusips_by_date(
+    historical_auctions_df: pd.DataFrame, dates: list, use_issue_date: bool = True
+):
+    historical_auctions_df = auction_df_filterer(historical_auctions_df)
+    date_column = "issue_date" if use_issue_date else "auction_date"
+    historical_auctions_df = historical_auctions_df.sort_values(
+        by=[date_column], ascending=False
+    )
+    historical_auctions_df = historical_auctions_df.drop_duplicates(
+        subset=["cusip"], keep="last"
+    )
+    grouped = historical_auctions_df.groupby("original_security_term")
+    otr_cusips_by_date = {date: [] for date in dates}
+    for _, group in grouped:
+        group = group.reset_index(drop=True)
+        for date in dates:
+            filtered_group = group[
+                (group[date_column] <= date) & (group["maturity_date"] > date)
+            ]
+            if not filtered_group.empty:
+                otr_cusip = filtered_group.iloc[0]["cusip"]
+                otr_cusips_by_date[date].append(otr_cusip)
+
+    return otr_cusips_by_date
+
+
+def process_cusip_otr_daterange(cusip, historical_auctions_df, date_column):
+    try:
+        tenor = historical_auctions_df[historical_auctions_df["cusip"] == cusip][
+            "original_security_term"
+        ].iloc[0]
+        tenor_df: pd.DataFrame = historical_auctions_df[
+            historical_auctions_df["original_security_term"] == tenor
+        ].reset_index()
+        otr_df = tenor_df[tenor_df["cusip"] == cusip]
+        otr_index = otr_df.index[0]
+        start_date: pd.Timestamp = otr_df[date_column].iloc[0]
+        start_date = start_date.to_pydatetime()
+
+        if otr_index == 0:
+            return cusip, (start_date, datetime.today().date())
+
+        if otr_index < len(tenor_df) - 1:
+            end_date: pd.Timestamp = tenor_df[date_column].iloc[otr_index - 1]
+            end_date = end_date.to_pydatetime()
+        else:
+            end_date = datetime.today().date()
+
+        return cusip, {"start_date": start_date, "end_date": end_date}
+    except Exception as e:
+        # print(f"Something went wrong for {cusip}: {e}")
+        return cusip, {"start_date": None, "end_date": None}
+
+
+def get_otr_date_ranges(
+    historical_auctions_df: pd.DataFrame, cusips: List[str], use_issue_date: bool = True
+) -> Dict[str, Tuple[datetime, datetime]]:
+
+    historical_auctions_df = auction_df_filterer(historical_auctions_df)
+    date_column = "issue_date" if use_issue_date else "auction_date"
+    historical_auctions_df = historical_auctions_df.sort_values(
+        by=[date_column], ascending=False
+    )
+    historical_auctions_df = historical_auctions_df[
+        historical_auctions_df["issue_date"].dt.date < datetime.today().date()
+    ]
+    historical_auctions_df = historical_auctions_df.drop_duplicates(
+        subset=["cusip"], keep="last"
+    )
+
+    cusip_daterange_map = {}
+    with ThreadPoolExecutor() as executor:
+        futures = {
+            executor.submit(
+                process_cusip_otr_daterange, cusip, historical_auctions_df, date_column
+            ): cusip
+            for cusip in cusips
+        }
+
+        for future in as_completed(futures):
+            cusip, date_range = future.result()
+            cusip_daterange_map[cusip] = date_range
+
+    return cusip_daterange_map

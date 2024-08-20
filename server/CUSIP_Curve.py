@@ -9,14 +9,13 @@ from datetime import datetime
 from functools import partial, reduce
 from typing import Dict, List, Optional, Tuple
 
+import os
 import aiohttp
 import httpx
 import numpy as np
 import pandas as pd
 import requests
 import ujson as json
-from pandas.tseries.holiday import USFederalHolidayCalendar
-from pandas.tseries.offsets import CustomBusinessDay
 
 from server.utils.QL_BondPricer import QL_BondPricer
 from server.utils.RL_BondPricer import RL_BondPricer
@@ -25,7 +24,6 @@ from server.utils.utils import (
     build_treasurydirect_header,
     cookie_string_to_dict,
     get_active_cusips,
-    get_historical_on_the_run_cusips,
     get_last_n_off_the_run_cusips,
     historical_auction_cols,
     is_valid_ust_cusip,
@@ -33,11 +31,31 @@ from server.utils.utils import (
     ust_labeler,
     ust_sorter,
 )
+from server.utils.fred import Fred
+from server.utils.fetch_ust_par_yields import (
+    multi_download_year_treasury_par_yield_curve_rate,
+)
 
 warnings.filterwarnings("ignore", category=pd.errors.SettingWithCopyWarning)
 warnings.simplefilter(action="ignore", category=FutureWarning)
 
 import sys
+
+Valid_String_Tenors = [
+    "4-Week",
+    "8-Week",
+    "13-Week",
+    "17-Week",
+    "26-Week",
+    "52-Week",
+    "2-Year",
+    "3-Year",
+    "5-Year",
+    "7-Year",
+    "10-Year",
+    "20-Year",
+    "30-Year",
+]
 
 if sys.platform == "win32":
     loop = asyncio.ProactorEventLoop()
@@ -102,6 +120,9 @@ def calculate_yields(row, as_of_date, use_quantlib=False):
 class CUSIP_Curve:
     _use_ust_issue_date: bool = False
     _global_timeout: int = 10
+    _historical_auctions_df: pd.DataFrame = (None,)
+    _fred: Fred = None
+    _proxies: Dict[str, str] = {"http": None, "https": None}
 
     _logger = logging.getLogger(__name__)
     _debug_verbose: bool = False
@@ -113,6 +134,8 @@ class CUSIP_Curve:
         self,
         use_ust_issue_date: Optional[bool] = False,
         global_timeout: int = 10,
+        fred_api_key: Optional[str] = None,
+        proxies: Optional[Dict[str, str]] = None,
         debug_verbose: Optional[bool] = False,
         info_verbose: Optional[bool] = False,
         error_verbose: Optional[bool] = False,
@@ -120,6 +143,12 @@ class CUSIP_Curve:
     ):
         self._use_ust_issue_date = use_ust_issue_date
         self._global_timeout = global_timeout
+
+        self._historical_auctions_df = self.get_auctions_df()
+        self._proxies = proxies
+
+        if fred_api_key:
+            self._fred = Fred(api_key=fred_api_key, proxies=self._proxies)
 
         self._debug_verbose = debug_verbose
         self._error_verbose = error_verbose
@@ -164,7 +193,9 @@ class CUSIP_Curve:
 
         def get_treasury_query_sizing() -> List[str]:
             base_url = "https://api.fiscaldata.treasury.gov/services/api/fiscal_service/v1/accounting/od/auctions_query?page[number]=1&page[size]=1"
-            res = requests.get(base_url, headers=build_treasurydirect_header())
+            res = requests.get(
+                base_url, headers=build_treasurydirect_header(), proxies=self._proxies
+            )
             if res.ok:
                 meta = res.json()["meta"]
                 size = meta["total-count"]
@@ -197,7 +228,11 @@ class CUSIP_Curve:
             uid: Optional[str | int] = None,
         ):
             try:
-                response = await client.get(url, headers=build_treasurydirect_header())
+                response = await client.get(
+                    url,
+                    headers=build_treasurydirect_header(),
+                    proxy=self._proxies["https"],
+                )
                 response.raise_for_status()
                 json_data: JSON = response.json()
                 if as_of_date:
@@ -251,7 +286,7 @@ class CUSIP_Curve:
             return await asyncio.gather(*tasks)
 
         async def run_fetch_all(as_of_date: datetime):
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(proxy=self._proxies["https"]) as client:
                 all_data = await build_tasks(client=client, as_of_date=as_of_date)
                 return all_data
 
@@ -310,6 +345,7 @@ class CUSIP_Curve:
                         headers=headers,
                         follow_redirects=False,
                         timeout=self._global_timeout,
+                        proxy=self._proxies["https"],
                     )
                     if response.is_redirect:
                         redirect_url = response.headers.get("Location")
@@ -452,7 +488,9 @@ class CUSIP_Curve:
         try:
             while retries < max_retries:
                 try:
-                    response = await client.get(url, headers=headers)
+                    response = await client.get(
+                        url, headers=headers, proxy=self._proxies["https"]
+                    )
                     response.raise_for_status()
                     res_json = response.json()
                     df = pd.DataFrame(res_json["data"])
@@ -564,98 +602,160 @@ class CUSIP_Curve:
         ]
         return tasks
 
-    # TODO
-    def get_historical_cts(
+    def get_historical_ct_yields(
         self,
         start_date: datetime,
         end_date: datetime,
+        tenors: Optional[List[str]] = None,
         use_bid_side: Optional[bool] = False,
         use_offer_side: Optional[bool] = False,
         use_mid_side: Optional[bool] = False,
-        use_prices: Optional[bool] = False,
-        max_concurrent_tasks: int = 64,
-        max_keepalive_connections: Optional[int] = 10,
     ):
-        cols_to_return = ["cusip"]
+        side = "eod"
         if use_bid_side:
-            cols_to_return.append("bid_price" if use_prices else "bid_yield")
+            side = "bid"
         elif use_offer_side:
-            cols_to_return.append("offer_price" if use_prices else "offer_yield")
+            side = "offer"
         elif use_mid_side:
-            cols_to_return.append("mid_price" if use_prices else "mid_yield")
-        else:
-            cols_to_return.append("eod_price" if use_prices else "eod_yield")
+            side = "mid"
 
-        async def build_tasks(
-            client: httpx.AsyncClient,
-            dates: List[datetime],
-        ):
-            tasks = []
-            semaphore = asyncio.Semaphore(max_concurrent_tasks)
-            for date in dates:
-                task = self._fetch_ust_prices_from_github_with_semaphore(
-                    semaphore=semaphore,
-                    client=client,
-                    date=date,
-                    cols_to_return=cols_to_return,
-                    assume_otrs=True,
-                    set_cusips_as_index=True,
-                )
-                tasks.append(task)
-
-            return await asyncio.gather(*tasks)
-
-        async def run_fetch_all(dates: List[datetime]):
-            limits = httpx.Limits(
-                max_connections=max_concurrent_tasks,
-                max_keepalive_connections=max_keepalive_connections,
+        url = f"https://raw.githubusercontent.com/cleeclee123/CUSIP-Timeseries/main/historical_ct_yields_{side}_side.json"
+        try:
+            res = requests.get(
+                url,
+                headers=self.github_headers(
+                    path=f"/cleeclee123/CUSIP-Timeseries/main/historical_ct_yields_{side}_side.json"
+                ),
+                proxies=self._proxies,
             )
-            async with httpx.AsyncClient(limits=limits) as client:
-                all_data = await build_tasks(
-                    client=client,
-                    dates=dates,
-                )
-                return all_data
+            res.raise_for_status()
+            df = pd.DataFrame(res.json())
+            df["Date"] = pd.to_datetime(df["Date"])
+            df = df[(df["Date"] >= start_date) & (df["Date"] <= end_date)]
+            df = df.reset_index(drop=True)
+            if tenors:
+                tenors = ["Date"] + tenors
+                return df[tenors]
+            return df
+        except Exception as e:
+            self._logger.error(f"Historical CT Yields GitHub - {str(e)}")
 
-        bdays = (
-            pd.date_range(
-                start=start_date,
-                end=end_date,
-                freq=CustomBusinessDay(calendar=USFederalHolidayCalendar()),
+    def get_historical_cmt_yields(
+        self,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        use_treasury_par: Optional[bool] = False,
+        treasury_data_dir: Optional[str] = None,
+        download_treasury_par_yields: Optional[bool] = False,
+        apply_long_term_extrapolation_factor: Optional[bool] = False,
+        tenors: Optional[List[str]] = None,
+    ):
+        if self._fred is not None and not use_treasury_par:
+            print("Fetching from FRED...")
+            df = self._fred.get_multiple_series(
+                series_ids=[
+                    "DTB3",
+                    "DTB6",
+                    "DGS1",
+                    "DGS2",
+                    "DGS3",
+                    "DGS5",
+                    "DGS7",
+                    "DGS10",
+                    "DGS20",
+                    "DGS30",
+                ],
+                one_df=True,
+                observation_start=start_date,
+                observation_end=end_date,
             )
-            .to_pydatetime()
-            .tolist()
-        )
-        results: List[Tuple[datetime, pd.DataFrame]] = asyncio.run(
-            run_fetch_all(dates=bdays)
-        )
-        results_dict: Dict[datetime, pd.DataFrame] = {
-            dt: df for dt, df in results if dt is not None and df is not None
-        }
-        combined_df = pd.concat(results_dict).reset_index()
-        final_df = combined_df.pivot(
-            index="level_0", columns="cusip", values=cols_to_return[1]
-        )
-        final_df = final_df.rename_axis("Date").reset_index()
-        final_df.columns.name = None
+            df.columns = [
+                "13-Week",
+                "26-Week",
+                "52-Week",
+                "2-Year",
+                "3-Year",
+                "5-Year",
+                "7-Year",
+                "10-Year",
+                "20-Year",
+                "30-Year",
+            ]
+            if tenors:
+                tenors = ["Date"] + tenors
+                return df[tenors]
+            df = df.dropna()
+            df = df.rename_axis("Date").reset_index()
+            return df
 
-        mapping = {
-            "Date": 0,
-            "17-Week": 0.25,
-            "26-Week": 0.5,
-            "52-Week": 1,
-            "2-Year": 2,
-            "3-Year": 3,
-            "5-Year": 5,
-            "7-Year": 7,
-            "10-Year": 10,
-            "20-Year": 20,
-            "30-Year": 30,
-        }
-        cols_sorted = sorted(
-            final_df.columns, key=lambda col: mapping.get(col, float("inf"))
-        )
-        return final_df[cols_sorted]
+        if use_treasury_par:
+            print("Fetching from treasury.gov...")
+            dir_path = treasury_data_dir or os.path.join(
+                os.getcwd(), "data", "treasury"
+            )
+            start_year = start_date.year if start_date else 2024
+            end_year = end_date.year if end_date else 1990
+            if start_year == end_year:
+                end_year -= 1
+            years = [str(x) for x in range(start_year, end_year, -1)]
+            ust_daily_data = multi_download_year_treasury_par_yield_curve_rate(
+                years,
+                dir_path,
+                run_all=True,
+                download=download_treasury_par_yields,
+                proxy=self._proxies["https"],
+            )
+            if "daily_treasury_yield_curve" not in ust_daily_data:
+                raise ValueError(
+                    "CMT Yield - Fetch Failed - Fetching from treasury.gov"
+                )
+            df_par_rates: pd.DataFrame = ust_daily_data["daily_treasury_yield_curve"]
+            df_par_rates["Date"] = pd.to_datetime(df_par_rates["Date"])
+            df_par_rates = df_par_rates.sort_values(
+                by=["Date"], ascending=True
+            ).reset_index(drop=True)
+
+            if start_date:
+                df_par_rates = df_par_rates[df_par_rates["Date"] >= start_date]
+            if end_date:
+                df_par_rates = df_par_rates[df_par_rates["Date"] <= end_date]
+
+            if apply_long_term_extrapolation_factor:
+                df_lt_avg_rate = ust_daily_data["daily_treasury_long_term_rate"]
+                df_lt_avg_rate["Date"] = pd.to_datetime(df_lt_avg_rate["Date"])
+
+                df_par_rates_lt_adj = pd.merge(
+                    df_par_rates, df_lt_avg_rate, on="Date", how="left"
+                )
+                df_par_rates_lt_adj["20 Yr"] = df_par_rates_lt_adj["20 Yr"].fillna(
+                    df_par_rates_lt_adj["TREASURY 20-Yr CMT"]
+                )
+                df_par_rates_lt_adj["30 Yr"] = np.where(
+                    df_par_rates_lt_adj["30 Yr"].isna(),
+                    df_par_rates_lt_adj["20 Yr"]
+                    + df_par_rates_lt_adj["Extrapolation Factor"],
+                    df_par_rates_lt_adj["30 Yr"],
+                )
+                df_par_rates_lt_adj = df_par_rates_lt_adj.drop(
+                    columns=[
+                        "LT COMPOSITE (>10 Yrs)",
+                        "TREASURY 20-Yr CMT",
+                        "Extrapolation Factor",
+                    ]
+                )
+                df_par_rates_lt_adj.columns = ["Date"] + Valid_String_Tenors
+                if tenors:
+                    tenors = ["Date"] + tenors
+                    df_par_rates_lt_adj[tenors]
+                return df_par_rates_lt_adj
+
+            df_par_rates.columns = ["Date"] + Valid_String_Tenors
+            if tenors:
+                tenors = ["Date"] + tenors
+                return df_par_rates[tenors]
+            return df_par_rates
+
+        print("Plz put ur Fred API key or enable 'use_treasury_par' ")
 
     async def _fetch_single_ust_timeseries_github(
         self,
@@ -675,7 +775,9 @@ class CUSIP_Curve:
                     path=f"/cleeclee123/CUSIP-Timeseries/main/{cusip}.json"
                 )
                 try:
-                    response = await client.get(url, headers=headers)
+                    response = await client.get(
+                        url, headers=headers, proxy=self._proxies["https"]
+                    )
                     response.raise_for_status()
                     response_json = response.json()
                     df = pd.DataFrame(response_json)
@@ -759,7 +861,9 @@ class CUSIP_Curve:
                 max_connections=max_concurrent_tasks,
                 max_keepalive_connections=max_keepalive_connections,
             )
-            async with httpx.AsyncClient(limits=limits) as client:
+            async with httpx.AsyncClient(
+                limits=limits, proxy=self._proxies["https"]
+            ) as client:
                 all_data = await build_tasks(client=client, cusips=cusips)
                 return all_data
 
@@ -771,10 +875,6 @@ class CUSIP_Curve:
         }
         return results_dict
 
-    # TODO
-    def get_historical_par_yields():
-        pass
-
     async def _build_fetch_tasks_historical_soma_holdings(
         self,
         client: httpx.AsyncClient,
@@ -782,7 +882,9 @@ class CUSIP_Curve:
         uid: Optional[str | int] = None,
     ):
         valid_soma_holding_dates_reponse = requests.get(
-            "https://markets.newyorkfed.org/api/soma/asofdates/list.json"
+            "https://markets.newyorkfed.org/api/soma/asofdates/list.json",
+            headers=build_treasurydirect_header(host_str="markets.newyorkfed.org"),
+            proxies=self._proxies,
         )
         if valid_soma_holding_dates_reponse.ok:
             valid_soma_holding_dates_json = valid_soma_holding_dates_reponse.json()
@@ -827,6 +929,7 @@ class CUSIP_Curve:
                     headers=build_treasurydirect_header(
                         host_str="markets.newyorkfed.org"
                     ),
+                    proxy=self._proxies["https"]
                 )
                 response.raise_for_status()
                 curr_soma_holdings_json = response.json()
@@ -913,6 +1016,7 @@ class CUSIP_Curve:
                     headers=build_treasurydirect_header(
                         host_str="api.fiscaldata.treasury.gov"
                     ),
+                    proxy=self._proxies["https"]
                 )
                 response.raise_for_status()
                 curr_stripping_activity_json = response.json()
@@ -1012,7 +1116,7 @@ class CUSIP_Curve:
             finra_cookie_t1 = time.time()
             finra_cookie_url = "https://services-dynarep.ddwa.finra.org/public/reporting/v2/group/Firm/name/ActiveIndividual/dynamiclookup/examCode"
             finra_cookie_response = requests.get(
-                finra_cookie_url, headers=finra_cookie_headers
+                finra_cookie_url, headers=finra_cookie_headers, proxies=self._proxies
             )
             if not finra_cookie_response.ok:
                 raise ValueError(
@@ -1116,6 +1220,7 @@ class CUSIP_Curve:
                                 limit=1,
                                 offset=1,
                             ),
+                            proxy=self._proxies["https"]
                         )
                         config_response.raise_for_status()
                         record_total_json = await config_response.json()
@@ -1153,7 +1258,7 @@ class CUSIP_Curve:
                 async def run_fetch_all(
                     cusips: List[str], start_date: datetime, end_date: datetime
                 ) -> List[pd.DataFrame]:
-                    async with aiohttp.ClientSession() as config_session:
+                    async with aiohttp.ClientSession(proxy=self._proxies["https"]) as config_session:
                         all_data = await build_finra_config_tasks(
                             config_session=config_session,
                             cusips=cusips,
@@ -1204,6 +1309,7 @@ class CUSIP_Curve:
                             limit=5000,
                             offset=offset,
                         ),
+                        proxy=self._proxies["https"]
                     )
                     response.raise_for_status()
                     trade_history_json = await response.json()
@@ -1273,7 +1379,7 @@ class CUSIP_Curve:
                 sock_connect=session_timeout_minutes * 60,
                 sock_read=session_timeout_minutes * 60,
             )
-            async with aiohttp.ClientSession(timeout=session_timeout) as session:
+            async with aiohttp.ClientSession(timeout=session_timeout, proxy=self._proxies["https"]) as session:
                 all_data = await build_tasks(
                     session=session,
                     cusips=cusips,
@@ -1330,9 +1436,8 @@ class CUSIP_Curve:
         include_auction_results: Optional[bool] = False,
         include_soma_holdings: Optional[bool] = False,
         include_stripping_activity: Optional[bool] = False,
-        auctions_df: Optional[pd.DataFrame] = None,
+        # auctions_df: Optional[pd.DataFrame] = None,
         sorted: Optional[bool] = False,
-        clean_auctions_df: Optional[bool] = False,
         use_github: Optional[bool] = False,
     ):
         if use_github:
@@ -1362,10 +1467,6 @@ class CUSIP_Curve:
             )
             tasks = ust_historical_prices_tasks
 
-            if auctions_df is None:
-                tasks += await self._build_fetch_tasks_historical_treasury_auctions(
-                    client=client, as_of_date=as_of_date, uid="ust_auctions"
-                )
             if include_soma_holdings:
                 tasks += await self._build_fetch_tasks_historical_soma_holdings(
                     client=client, dates=[as_of_date], uid="soma_holdings"
@@ -1379,7 +1480,7 @@ class CUSIP_Curve:
 
         async def run_fetch_all(as_of_date: datetime):
             limits = httpx.Limits(max_connections=10)
-            async with httpx.AsyncClient(limits=limits) as client:
+            async with httpx.AsyncClient(limits=limits, proxy=self._proxies["https"]) as client:
                 all_data = await gather_tasks(client=client, as_of_date=as_of_date)
                 return all_data
 
@@ -1397,9 +1498,11 @@ class CUSIP_Curve:
             else:
                 self._logger.warning(f"CURVE SET - unknown UID, Current Tuple: {tup}")
 
-        auctions_df = pd.concat(auctions_dfs) if auctions_df is None else auctions_df
-        if clean_auctions_df:
-            auctions_df
+        auctions_df = get_active_cusips(
+            historical_auctions_df=self._historical_auctions_df,
+            as_of_date=as_of_date,
+            use_issue_date=True,
+        )
         otr_cusips_dict = get_last_n_off_the_run_cusips(
             auctions_df=auctions_df,
             n=0,
@@ -1427,6 +1530,7 @@ class CUSIP_Curve:
                     "high_investment_rate",
                     "is_on_the_run",
                     "label",
+                    "security_term",
                     "original_security_term",
                 ]
             ]
@@ -1461,6 +1565,7 @@ class CUSIP_Curve:
             ) / 2
 
         merged_df = merged_df.replace("null", np.nan)
+        merged_df = merged_df[merged_df["original_security_term"].notna()]
         if sorted:
             merged_df["sort_key"] = merged_df["original_security_term"].apply(
                 ust_sorter

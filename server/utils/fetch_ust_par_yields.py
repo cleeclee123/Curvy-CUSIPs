@@ -2,7 +2,7 @@ import asyncio
 import http
 import os
 import shutil
-from typing import Dict, List, TypeAlias
+from typing import Dict, List, TypeAlias, Optional
 
 import aiohttp
 import pandas as pd
@@ -56,6 +56,7 @@ def multi_download_year_treasury_par_yield_curve_rate(
     cj: http.cookies = None,
     run_all=False,
     verbose=False,
+    proxy: Optional[str] = None,
 ) -> pd.DataFrame:
     async def fetch_from_treasurygov(
         session: aiohttp.ClientSession, url: str, curr_year: int
@@ -66,7 +67,7 @@ def multi_download_year_treasury_par_yield_curve_rate(
             full_file_path = os.path.join(
                 raw_path, "temp", f"{treasurygov_data_type}.csv"
             )
-            async with session.get(url, headers=headers) as response:
+            async with session.get(url, headers=headers, proxy=proxy) as response:
                 if response.status == 200:
                     with open(full_file_path, "wb") as f:
                         chunk_size = 8192
@@ -146,7 +147,7 @@ def multi_download_year_treasury_par_yield_curve_rate(
         return await asyncio.gather(*tasks)
 
     async def run_fetch_all() -> List[pd.DataFrame]:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(proxy=proxy) as session:
             all_data = await get_promises(session)
             return all_data
 
