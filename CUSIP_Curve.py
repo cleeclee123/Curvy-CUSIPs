@@ -690,11 +690,11 @@ class CUSIP_Curve:
         if use_treasury_par:
             print("Fetching from treasury.gov...")
             dir_path = treasury_data_dir or os.getcwd()
-            start_year = start_date.year if start_date else 2024
-            end_year = end_date.year if end_date else 1990
+            start_year = start_date.year if start_date else 1990 
+            end_year = end_date.year if end_date else 2024 
             if start_year == end_year:
-                end_year -= 1
-            years = [str(x) for x in range(start_year, end_year, -1)]
+                start_year = start_year - 1
+            years = [str(x) for x in range(end_year, start_year, -1)]
             ust_daily_data = multi_download_year_treasury_par_yield_curve_rate(
                 years,
                 dir_path,
@@ -718,34 +718,43 @@ class CUSIP_Curve:
                 df_par_rates = df_par_rates[df_par_rates["Date"] <= end_date]
 
             if apply_long_term_extrapolation_factor:
-                df_lt_avg_rate = ust_daily_data["daily_treasury_long_term_rate"]
-                df_lt_avg_rate["Date"] = pd.to_datetime(df_lt_avg_rate["Date"])
-
-                df_par_rates_lt_adj = pd.merge(
-                    df_par_rates, df_lt_avg_rate, on="Date", how="left"
-                )
-                df_par_rates_lt_adj["20 Yr"] = df_par_rates_lt_adj["20 Yr"].fillna(
-                    df_par_rates_lt_adj["TREASURY 20-Yr CMT"]
-                )
-                df_par_rates_lt_adj["30 Yr"] = np.where(
-                    df_par_rates_lt_adj["30 Yr"].isna(),
-                    df_par_rates_lt_adj["20 Yr"]
-                    + df_par_rates_lt_adj["Extrapolation Factor"],
-                    df_par_rates_lt_adj["30 Yr"],
-                )
-                df_par_rates_lt_adj = df_par_rates_lt_adj.drop(
-                    columns=[
-                        "LT COMPOSITE (>10 Yrs)",
-                        "TREASURY 20-Yr CMT",
-                        "Extrapolation Factor",
-                    ]
-                )
-                df_par_rates_lt_adj.columns = ["Date"] + Valid_String_Tenors
-                if tenors:
-                    tenors = ["Date"] + tenors
-                    df_par_rates_lt_adj[tenors]
-                return df_par_rates_lt_adj
-
+                try:
+                    df_lt_avg_rate = ust_daily_data["daily_treasury_long_term_rate"]
+                    df_lt_avg_rate["Date"] = pd.to_datetime(df_lt_avg_rate["Date"])
+                    df_par_rates_lt_adj = pd.merge(
+                        df_par_rates, df_lt_avg_rate, on="Date", how="left"
+                    )
+                    df_par_rates_lt_adj["20 Yr"] = df_par_rates_lt_adj["20 Yr"].fillna(
+                        df_par_rates_lt_adj["TREASURY 20-Yr CMT"]
+                    )
+                    df_par_rates_lt_adj["30 Yr"] = np.where(
+                        df_par_rates_lt_adj["30 Yr"].isna(),
+                        df_par_rates_lt_adj["20 Yr"]
+                        + df_par_rates_lt_adj["Extrapolation Factor"],
+                        df_par_rates_lt_adj["30 Yr"],
+                    )
+                    df_par_rates_lt_adj = df_par_rates_lt_adj.drop(
+                        columns=[
+                            "LT COMPOSITE (>10 Yrs)",
+                            "TREASURY 20-Yr CMT",
+                            "Extrapolation Factor",
+                        ]
+                    )
+                    df_par_rates_lt_adj.columns = ["Date"] + Valid_String_Tenors
+                    if tenors:
+                        tenors = ["Date"] + tenors
+                        df_par_rates_lt_adj[tenors]
+                    if download_treasury_par_yields:
+                        df_par_rates_lt_adj.to_excel(os.path.join(dir_path, "daily_treasury_par_yields_with_lt_extrap.xlsx")) 
+                    return df_par_rates_lt_adj
+                except Exception as e:
+                    self._logger.error(f"UST CMT Yields - LT Extra Failed: {str(e)}")
+                    msg = "Applying Long-Term Extrapolation Factor Failed"
+                    is_to_recent = start_date > datetime(2006, 2, 9)
+                    if is_to_recent:
+                        msg += f" - {start_date} is too recent - pick a starting date older than February 9, 2006"
+                    print(msg)
+                    
             df_par_rates.columns = ["Date"] + Valid_String_Tenors
             if tenors:
                 tenors = ["Date"] + tenors
