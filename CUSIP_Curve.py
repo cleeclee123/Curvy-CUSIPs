@@ -689,9 +689,7 @@ class CUSIP_Curve:
 
         if use_treasury_par:
             print("Fetching from treasury.gov...")
-            dir_path = treasury_data_dir or os.path.join(
-                os.getcwd(), "data", "treasury"
-            )
+            dir_path = treasury_data_dir or os.getcwd()
             start_year = start_date.year if start_date else 2024
             end_year = end_date.year if end_date else 1990
             if start_year == end_year:

@@ -152,9 +152,9 @@ def multi_download_year_treasury_par_yield_curve_rate(
             return all_data
 
     try:
-        os.mkdir(f"{raw_path}/temp")
+        os.mkdir(os.path.join(raw_path, "temp"))
         dfs: List[Dict[str, pd.DataFrame]] = asyncio.run(run_fetch_all())
-        shutil.rmtree(f"{raw_path}/temp")
+        shutil.rmtree(os.path.join(raw_path, "temp"))
 
         if not run_all:
             dfs = [next(iter(dictionary.values())) for dictionary in dfs]
@@ -178,6 +178,6 @@ def multi_download_year_treasury_par_yield_curve_rate(
 
         return organized_by_ust_type_df_dict_concated
     except Exception as e:
-        if os.path.exists(f"{raw_path}/temp"):
-            shutil.rmtree(f"{raw_path}/temp")
+        if os.path.exists(os.path.join(raw_path, "temp")):
+            shutil.rmtree(os.path.join(raw_path, "temp"))
         raise e
