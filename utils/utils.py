@@ -89,7 +89,7 @@ def get_last_n_off_the_run_cusips(
     filtered=False,
     as_of_date=datetime.today(),
     use_issue_date=False,
-) -> List[Dict[str, str]]:
+) -> List[Dict[str, str]] | pd.DataFrame:
     if not auction_json and auctions_df is None:
         return pd.DataFrame(columns=historical_auction_cols())
 
@@ -148,6 +148,9 @@ def get_last_n_off_the_run_cusips(
             "issue_date",
         ]
     ]
+    
+    if n == 0:
+        return on_the_run_result 
 
     off_the_run = auctions_df[~auctions_df.index.isin(on_the_run.index)]
     off_the_run_result = (

@@ -147,32 +147,37 @@ def multi_download_year_treasury_par_yield_curve_rate(
         return await asyncio.gather(*tasks)
 
     async def run_fetch_all() -> List[pd.DataFrame]:
-        async with aiohttp.ClientSession(proxy=proxy) as session:
+        async with aiohttp.ClientSession() as session:
             all_data = await get_promises(session)
             return all_data
 
-    os.mkdir(f"{raw_path}/temp")
-    dfs: List[Dict[str, pd.DataFrame]] = asyncio.run(run_fetch_all())
-    shutil.rmtree(f"{raw_path}/temp")
+    try:
+        os.mkdir(f"{raw_path}/temp")
+        dfs: List[Dict[str, pd.DataFrame]] = asyncio.run(run_fetch_all())
+        shutil.rmtree(f"{raw_path}/temp")
 
-    if not run_all:
-        dfs = [next(iter(dictionary.values())) for dictionary in dfs]
-        yield_df = pd.concat(dfs, ignore_index=True)
-        return yield_df
+        if not run_all:
+            dfs = [next(iter(dictionary.values())) for dictionary in dfs]
+            yield_df = pd.concat(dfs, ignore_index=True)
+            return yield_df
 
-    organized_by_ust_type_dict: Dict[str, List[pd.DataFrame]] = {}
-    for dictionary in dfs:
-        ust_data_type, df = next(iter(dictionary)), next(iter(dictionary.values()))
-        if not ust_data_type or df is None or df.empty:
-            continue
-        if ust_data_type not in organized_by_ust_type_dict:
-            organized_by_ust_type_dict[ust_data_type] = []
-        organized_by_ust_type_dict[ust_data_type].append(df)
+        organized_by_ust_type_dict: Dict[str, List[pd.DataFrame]] = {}
+        for dictionary in dfs:
+            ust_data_type, df = next(iter(dictionary)), next(iter(dictionary.values()))
+            if not ust_data_type or df is None or df.empty:
+                continue
+            if ust_data_type not in organized_by_ust_type_dict:
+                organized_by_ust_type_dict[ust_data_type] = []
+            organized_by_ust_type_dict[ust_data_type].append(df)
 
-    organized_by_ust_type_df_dict_concated: Dict[str, pd.DataFrame] = {}
-    for ust_data_type in organized_by_ust_type_dict.keys():
-        dfs = organized_by_ust_type_dict[ust_data_type]
-        concated_df = pd.concat(dfs, ignore_index=True)
-        organized_by_ust_type_df_dict_concated[ust_data_type] = concated_df
+        organized_by_ust_type_df_dict_concated: Dict[str, pd.DataFrame] = {}
+        for ust_data_type in organized_by_ust_type_dict.keys():
+            dfs = organized_by_ust_type_dict[ust_data_type]
+            concated_df = pd.concat(dfs, ignore_index=True)
+            organized_by_ust_type_df_dict_concated[ust_data_type] = concated_df
 
-    return organized_by_ust_type_df_dict_concated
+        return organized_by_ust_type_df_dict_concated
+    except Exception as e:
+        if os.path.exists(f"{raw_path}/temp"):
+            shutil.rmtree(f"{raw_path}/temp")
+        raise e

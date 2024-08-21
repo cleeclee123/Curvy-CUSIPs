@@ -17,9 +17,9 @@ import pandas as pd
 import requests
 import ujson as json
 
-from server.utils.QL_BondPricer import QL_BondPricer
-from server.utils.RL_BondPricer import RL_BondPricer
-from server.utils.utils import (
+from utils.QL_BondPricer import QL_BondPricer
+from utils.RL_BondPricer import RL_BondPricer
+from utils.utils import (
     JSON,
     build_treasurydirect_header,
     cookie_string_to_dict,
@@ -31,8 +31,8 @@ from server.utils.utils import (
     ust_labeler,
     ust_sorter,
 )
-from server.utils.fred import Fred
-from server.utils.fetch_ust_par_yields import (
+from utils.fred import Fred
+from utils.fetch_ust_par_yields import (
     multi_download_year_treasury_par_yield_curve_rate,
 )
 
@@ -123,6 +123,7 @@ class CUSIP_Curve:
     _historical_auctions_df: pd.DataFrame = (None,)
     _fred: Fred = None
     _proxies: Dict[str, str] = {"http": None, "https": None}
+    _httpx_proxies: Dict[str, str] = {"http://": None, "https://": None}
 
     _logger = logging.getLogger(__name__)
     _debug_verbose: bool = False
@@ -145,7 +146,9 @@ class CUSIP_Curve:
         self._global_timeout = global_timeout
 
         self._historical_auctions_df = self.get_auctions_df()
-        self._proxies = proxies
+        self._proxies = proxies if proxies else {"http": None, "https": None} 
+        self._httpx_proxies["http://"] = self._proxies["http"]
+        self._httpx_proxies["https://"] = self._proxies["https"]
 
         if fred_api_key:
             self._fred = Fred(api_key=fred_api_key, proxies=self._proxies)
@@ -231,7 +234,6 @@ class CUSIP_Curve:
                 response = await client.get(
                     url,
                     headers=build_treasurydirect_header(),
-                    proxy=self._proxies["https"],
                 )
                 response.raise_for_status()
                 json_data: JSON = response.json()
@@ -345,14 +347,13 @@ class CUSIP_Curve:
                         headers=headers,
                         follow_redirects=False,
                         timeout=self._global_timeout,
-                        proxy=self._proxies["https"],
                     )
                     if response.is_redirect:
                         redirect_url = response.headers.get("Location")
                         self._logger.debug(
                             f"UST Prices - {date} Redirecting to {redirect_url}"
                         )
-                        response = await client.get(redirect_url)
+                        response = await client.get(redirect_url, headers=headers)
 
                     response.raise_for_status()
                     tables = pd.read_html(response.content, header=0)
@@ -488,9 +489,7 @@ class CUSIP_Curve:
         try:
             while retries < max_retries:
                 try:
-                    response = await client.get(
-                        url, headers=headers, proxy=self._proxies["https"]
-                    )
+                    response = await client.get(url, headers=headers)
                     response.raise_for_status()
                     res_json = response.json()
                     df = pd.DataFrame(res_json["data"])
@@ -775,9 +774,7 @@ class CUSIP_Curve:
                     path=f"/cleeclee123/CUSIP-Timeseries/main/{cusip}.json"
                 )
                 try:
-                    response = await client.get(
-                        url, headers=headers, proxy=self._proxies["https"]
-                    )
+                    response = await client.get(url, headers=headers)
                     response.raise_for_status()
                     response_json = response.json()
                     df = pd.DataFrame(response_json)
@@ -861,9 +858,7 @@ class CUSIP_Curve:
                 max_connections=max_concurrent_tasks,
                 max_keepalive_connections=max_keepalive_connections,
             )
-            async with httpx.AsyncClient(
-                limits=limits, proxy=self._proxies["https"]
-            ) as client:
+            async with httpx.AsyncClient(limits=limits) as client:
                 all_data = await build_tasks(client=client, cusips=cusips)
                 return all_data
 
@@ -929,7 +924,6 @@ class CUSIP_Curve:
                     headers=build_treasurydirect_header(
                         host_str="markets.newyorkfed.org"
                     ),
-                    proxy=self._proxies["https"]
                 )
                 response.raise_for_status()
                 curr_soma_holdings_json = response.json()
@@ -1016,7 +1010,6 @@ class CUSIP_Curve:
                     headers=build_treasurydirect_header(
                         host_str="api.fiscaldata.treasury.gov"
                     ),
-                    proxy=self._proxies["https"]
                 )
                 response.raise_for_status()
                 curr_stripping_activity_json = response.json()
@@ -1220,7 +1213,7 @@ class CUSIP_Curve:
                                 limit=1,
                                 offset=1,
                             ),
-                            proxy=self._proxies["https"]
+                            proxy=self._proxies["https"],
                         )
                         config_response.raise_for_status()
                         record_total_json = await config_response.json()
@@ -1258,7 +1251,9 @@ class CUSIP_Curve:
                 async def run_fetch_all(
                     cusips: List[str], start_date: datetime, end_date: datetime
                 ) -> List[pd.DataFrame]:
-                    async with aiohttp.ClientSession(proxy=self._proxies["https"]) as config_session:
+                    async with aiohttp.ClientSession(
+                        proxy=self._proxies["https"]
+                    ) as config_session:
                         all_data = await build_finra_config_tasks(
                             config_session=config_session,
                             cusips=cusips,
@@ -1309,7 +1304,7 @@ class CUSIP_Curve:
                             limit=5000,
                             offset=offset,
                         ),
-                        proxy=self._proxies["https"]
+                        proxy=self._proxies["https"],
                     )
                     response.raise_for_status()
                     trade_history_json = await response.json()
@@ -1379,7 +1374,9 @@ class CUSIP_Curve:
                 sock_connect=session_timeout_minutes * 60,
                 sock_read=session_timeout_minutes * 60,
             )
-            async with aiohttp.ClientSession(timeout=session_timeout, proxy=self._proxies["https"]) as session:
+            async with aiohttp.ClientSession(
+                timeout=session_timeout, proxy=self._proxies["https"]
+            ) as session:
                 all_data = await build_tasks(
                     session=session,
                     cusips=cusips,
@@ -1440,6 +1437,10 @@ class CUSIP_Curve:
         sorted: Optional[bool] = False,
         use_github: Optional[bool] = False,
     ):
+        if as_of_date.date() > datetime.today().date():
+            print(f"crystal ball feature not implemented, yet - {as_of_date} is in the future")
+            return 
+            
         if use_github:
             calc_ytms = False
 
@@ -1480,7 +1481,9 @@ class CUSIP_Curve:
 
         async def run_fetch_all(as_of_date: datetime):
             limits = httpx.Limits(max_connections=10)
-            async with httpx.AsyncClient(limits=limits, proxy=self._proxies["https"]) as client:
+            async with httpx.AsyncClient(
+                limits=limits,
+            ) as client:
                 all_data = await gather_tasks(client=client, as_of_date=as_of_date)
                 return all_data
 
@@ -1503,15 +1506,15 @@ class CUSIP_Curve:
             as_of_date=as_of_date,
             use_issue_date=True,
         )
-        otr_cusips_dict = get_last_n_off_the_run_cusips(
+        otr_cusips_df: pd.DataFrame = get_last_n_off_the_run_cusips(
             auctions_df=auctions_df,
             n=0,
             filtered=True,
             as_of_date=as_of_date,
             use_issue_date=self._use_ust_issue_date,
-        )[0]
+        )
         auctions_df["is_on_the_run"] = auctions_df["cusip"].isin(
-            list(otr_cusips_dict.values())
+            otr_cusips_df["cusip"].to_list()
         )
         auctions_df["label"] = auctions_df["maturity_date"].apply(ust_labeler)
         auctions_df["time_to_maturity"] = (

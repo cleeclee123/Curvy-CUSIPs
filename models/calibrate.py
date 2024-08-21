@@ -6,14 +6,14 @@ from typing import Any, Optional, Tuple
 import numpy as np
 import numpy.typing as npt
 import pandas as pd
-from server.models.BjorkChristensen import BjorkChristensenCurve
-from server.models.BjorkChristensenAugmented import BjorkChristensenAugmentedCurve
-from server.models.DieboldLi import DieboldLiCurve
-from server.models.MLESM import MerrillLynchExponentialSplineModel
-from server.models.NelsonSiegel import NelsonSiegelCurve
-from server.models.NelsonSiegelSvensson import NelsonSiegelSvenssonCurve
-from server.models.PCA import PCACurve
-from server.models.SmithWilson import SmithWilsonCurve, find_ufr_ytm
+from models.BjorkChristensen import BjorkChristensenCurve
+from models.BjorkChristensenAugmented import BjorkChristensenAugmentedCurve
+from models.DieboldLi import DieboldLiCurve
+from models.MLESM import MerrillLynchExponentialSplineModel
+from models.NelsonSiegel import NelsonSiegelCurve
+from models.NelsonSiegelSvensson import NelsonSiegelSvenssonCurve
+from models.PCA import PCACurve
+from models.SmithWilson import SmithWilsonCurve, find_ufr_ytm
 from numpy.linalg import lstsq
 from scipy.optimize import OptimizeResult, minimize
 
