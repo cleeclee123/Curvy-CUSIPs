@@ -126,7 +126,10 @@ def get_last_n_off_the_run_cusips(
     )
 
     mapping = {
-        "17-Week": 0.25,
+        "4-Week": 0.077,
+        "8-Week": 0.15,
+        "13-Week": 0.25,
+        "17-Week": 0.33,
         "26-Week": 0.5,
         "52-Week": 1,
         "2-Year": 2,
@@ -445,3 +448,10 @@ def get_otr_date_ranges(
             cusip_daterange_map[cusip] = date_range
 
     return cusip_daterange_map
+
+
+def pydatetime_to_quantlib_date(py_datetime: datetime) -> ql.Date:
+    return ql.Date(py_datetime.day, py_datetime.month, py_datetime.year)
+
+def quantlib_date_to_pydatetime(ql_date: ql.Date):
+    return datetime(ql_date.year(), ql_date.month(), ql_date.dayOfMonth())

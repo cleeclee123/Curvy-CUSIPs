@@ -23,7 +23,7 @@ from typing import Literal, Optional, Dict, Callable, List, Tuple
 import logging
 import scipy.interpolate
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
+from models.MonotoneConvex import MonotoneConvex
 
 class CurveInterpolator:
     # all have to exist in curve_set
@@ -376,7 +376,10 @@ class CurveInterpolator:
             ynew[self._linspace_x > self._x[-1]] = right_extrap_values
 
         return ynew
-
+    
+    def _monotone_convex(self) -> np.ndarray:
+        mc_spline = MonotoneConvex(terms=self._x, spots=self._y)
+        return [mc_spline.spot(t) for t in self._linspace_x]
 
     def plotter(
         self,

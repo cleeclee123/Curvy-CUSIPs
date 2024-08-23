@@ -5,10 +5,11 @@ import multiprocessing as mp
 import time
 import warnings
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
+from pandas.tseries.offsets import BDay
 from functools import partial, reduce
-from typing import Dict, List, Optional, Tuple
-
+from typing import Dict, List, Optional, Tuple, Literal
+import QuantLib as ql
 import os
 import aiohttp
 import httpx
@@ -30,6 +31,8 @@ from utils.utils import (
     last_day_n_months_ago,
     ust_labeler,
     ust_sorter,
+    pydatetime_to_quantlib_date,
+    quantlib_date_to_pydatetime,
 )
 from utils.fred import Fred
 from utils.fetch_ust_par_yields import (
@@ -146,7 +149,7 @@ class CUSIP_Curve:
         self._global_timeout = global_timeout
 
         self._historical_auctions_df = self.get_auctions_df()
-        self._proxies = proxies if proxies else {"http": None, "https": None} 
+        self._proxies = proxies if proxies else {"http": None, "https": None}
         self._httpx_proxies["http://"] = self._proxies["http"]
         self._httpx_proxies["https://"] = self._proxies["https"]
 
@@ -690,8 +693,8 @@ class CUSIP_Curve:
         if use_treasury_par:
             print("Fetching from treasury.gov...")
             dir_path = treasury_data_dir or os.getcwd()
-            start_year = start_date.year if start_date else 1990 
-            end_year = end_date.year if end_date else 2024 
+            start_year = start_date.year if start_date else 1990
+            end_year = end_date.year if end_date else 2024
             if start_year == end_year:
                 start_year = start_year - 1
             years = [str(x) for x in range(end_year, start_year, -1)]
@@ -745,7 +748,12 @@ class CUSIP_Curve:
                         tenors = ["Date"] + tenors
                         df_par_rates_lt_adj[tenors]
                     if download_treasury_par_yields:
-                        df_par_rates_lt_adj.to_excel(os.path.join(dir_path, "daily_treasury_par_yields_with_lt_extrap.xlsx")) 
+                        df_par_rates_lt_adj.to_excel(
+                            os.path.join(
+                                dir_path,
+                                "daily_treasury_par_yields_with_lt_extrap.xlsx",
+                            )
+                        )
                     return df_par_rates_lt_adj
                 except Exception as e:
                     self._logger.error(f"UST CMT Yields - LT Extra Failed: {str(e)}")
@@ -754,7 +762,7 @@ class CUSIP_Curve:
                     if is_to_recent:
                         msg += f" - {start_date} is too recent - pick a starting date older than February 9, 2006"
                     print(msg)
-                    
+
             df_par_rates.columns = ["Date"] + Valid_String_Tenors
             if tenors:
                 tenors = ["Date"] + tenors
@@ -1443,13 +1451,21 @@ class CUSIP_Curve:
         # auctions_df: Optional[pd.DataFrame] = None,
         sorted: Optional[bool] = False,
         use_github: Optional[bool] = False,
+        include_off_the_run_number: Optional[bool] = False,
+        market_cols_to_return: List[str] = None,
     ):
         if as_of_date.date() > datetime.today().date():
-            print(f"crystal ball feature not implemented, yet - {as_of_date} is in the future")
-            return 
-            
+            print(
+                f"crystal ball feature not implemented, yet - {as_of_date} is in the future"
+            )
+            return
+
         if use_github:
             calc_ytms = False
+
+        if market_cols_to_return:
+            if "cusip" not in market_cols_to_return:
+                market_cols_to_return.insert(0, "cusip")
 
         async def gather_tasks(client: httpx.AsyncClient, as_of_date: datetime):
             ust_historical_prices_tasks = (
@@ -1464,12 +1480,21 @@ class CUSIP_Curve:
                         client=client,
                         dates=[as_of_date],
                         uid="ust_prices",
-                        cols_to_return=[
-                            "cusip",
-                            "offer_yield",
-                            "bid_yield",
-                            "eod_yield",
-                        ],
+                        cols_to_return=(
+                            [
+                                "cusip",
+                                "offer_price",
+                                "offer_yield",
+                                "bid_price",
+                                "bid_yield",
+                                "mid_price",
+                                "mid_yield",
+                                "eod_price",
+                                "eod_yield",
+                            ]
+                            if not market_cols_to_return
+                            else market_cols_to_return
+                        ),
                     )
                 )
             )
@@ -1549,14 +1574,16 @@ class CUSIP_Curve:
         )
         merged_df = pd.merge(left=auctions_df, right=merged_df, on="cusip", how="outer")
         merged_df = merged_df[merged_df["cusip"].apply(is_valid_ust_cusip)]
-        if not use_github:
-            merged_df["mid_price"] = (
-                merged_df["offer_price"] + merged_df["bid_price"]
-            ) / 2
-        else:
-            merged_df["mid_yield"] = (
-                merged_df["offer_yield"] + merged_df["bid_yield"]
-            ) / 2
+
+        if not market_cols_to_return:
+            if not use_github:
+                merged_df["mid_price"] = (
+                    merged_df["offer_price"] + merged_df["bid_price"]
+                ) / 2
+            else:
+                merged_df["mid_yield"] = (
+                    merged_df["offer_yield"] + merged_df["bid_yield"]
+                ) / 2
 
         if calc_ytms:
             calculate_yields_partial = partial(
@@ -1586,4 +1613,335 @@ class CUSIP_Curve:
                 .reset_index(drop=True)
             )
 
+        if include_off_the_run_number:
+            merged_df["rank"] = (
+                merged_df.groupby("original_security_term")["time_to_maturity"].rank(
+                    ascending=False, method="first"
+                )
+                - 1
+            )
+
         return merged_df
+
+    def _calc_spot_rates_on_tenors(
+        self,
+        yield_curve: ql.DiscountCurve | ql.ZeroCurve,
+        on_rate: float,
+        day_count: ql.ActualActual = ql.ActualActual(ql.ActualActual.ISDA),
+        price_col: Optional[str] = None,
+    ):
+        spots = []
+        tenors = []
+        maturity_dates = []
+        ref_date = yield_curve.referenceDate()
+
+        dates = yield_curve.dates()
+        for i, d in enumerate(dates):
+            yrs = day_count.yearFraction(ref_date, d)
+            if i == 0:
+                tenors.append(1 / 360)
+                spots.append(on_rate)
+                t_plus_1_sr: pd.Timestamp = quantlib_date_to_pydatetime(d) - BDay(1)
+                t_plus_1_sr = t_plus_1_sr.to_pydatetime()
+                t_plus_1_sr = t_plus_1_sr.replace(
+                    hour=0, minute=0, second=0, microsecond=0
+                )
+                maturity_dates.append(t_plus_1_sr)
+                continue
+
+            compounding = ql.Compounded
+            freq = ql.Semiannual
+            zero_rate = yield_curve.zeroRate(yrs, compounding, freq, True)
+            eq_rate = zero_rate.equivalentRate(
+                day_count, compounding, freq, ref_date, d
+            ).rate()
+            tenors.append(yrs)
+            spots.append(100 * eq_rate)
+            maturity_dates.append(quantlib_date_to_pydatetime(d))
+
+        price_col_type = price_col.split("_")[0] if price_col else None
+        spot_col_name = f"{price_col_type}_spot_rate" if price_col else "spot_rate"
+        return pd.DataFrame(
+            {
+                "maturity_date": maturity_dates,
+                "time_to_maturity": tenors,
+                spot_col_name: spots,
+            }
+        )
+
+    def _calc_spot_rates_intep_months(
+        self,
+        yield_curve: ql.DiscountCurve | ql.ZeroCurve,
+        on_rate: float,
+        months: Optional[int] = 361,
+        freq: Optional[float] = 1,
+        custom_tenors: Optional[List[int]] = None,
+        day_count=ql.ActualActual(ql.ActualActual.ISDA),
+        calendar=ql.UnitedStates(m=ql.UnitedStates.GovernmentBond),
+        price_col: Optional[str] = None,
+    ):
+        spots = []
+        tenors = []
+        maturity_dates = []
+        ref_date = yield_curve.referenceDate()
+        calc_date = ref_date
+        to_iterate = custom_tenors if custom_tenors else range(0, months, freq)
+        for month in to_iterate:
+            d = calendar.advance(ref_date, ql.Period(month, ql.Months))
+            yrs = month / 12.0
+            if yrs == 0:
+                tenors.append(1 / 360)
+                spots.append(on_rate)
+                t_plus_1_sr: pd.Timestamp = quantlib_date_to_pydatetime(d) - BDay(1)
+                t_plus_1_sr = t_plus_1_sr.to_pydatetime()
+                t_plus_1_sr = t_plus_1_sr.replace(
+                    hour=0, minute=0, second=0, microsecond=0
+                )
+                maturity_dates.append(t_plus_1_sr)
+                continue
+
+            compounding = ql.Compounded
+            freq = ql.Semiannual
+            zero_rate = yield_curve.zeroRate(yrs, compounding, freq)
+            tenors.append(yrs)
+            eq_rate = zero_rate.equivalentRate(
+                day_count, compounding, freq, calc_date, d
+            ).rate()
+            spots.append(100 * eq_rate)
+            maturity_dates.append(quantlib_date_to_pydatetime(d))
+
+        price_col_type = price_col.split("_")[0] if price_col else None
+        spot_col_name = f"{price_col_type}_spot_rate" if price_col else "spot_rate"
+        return pd.DataFrame(
+            {
+                "maturity_date": maturity_dates,
+                "time_to_maturity": tenors,
+                spot_col_name: spots,
+            }
+        )
+
+    """
+    Using QuantLib's Piecewise yield term structure for bootstrapping market observed prices to zeros rates at the respective ttms
+    - small differences between methods
+    - flag to take the averages of all Piecewise methods or pass in a specifc method
+    - passing in multiple ql_bootstrap_methods will take the average of the spot rates calculated from the different methods 
+    """
+
+    def get_spot_rates(
+        self,
+        curve_set_df: pd.DataFrame,
+        as_of_date: datetime,
+        on_rate: float,
+        ql_bootstrap_interp_methods: Optional[
+            List[
+                Literal[
+                    "ql_plld",
+                    "ql_lcd",
+                    "ql_lz",
+                    "ql_cz",
+                    "ql_lf",
+                    "ql_spd",
+                    "ql_kz",
+                    "ql_kld",
+                    "ql_mcf",
+                    "ql_mcz",
+                    "ql_ncz",
+                    "ql_nlcd",
+                    "ql_lmlcd",
+                    "ql_pcz",
+                    "ql_mpcz",
+                    "ql_lpcd",
+                    "ql_mlpcd",
+                ]
+            ]
+        ] = ["ql_plld"],
+        retrun_ql_zero_curve: Optional[bool] = False,
+        interpolated_months_num: Optional[int] = None,
+        interpolated_curve_yearly_freq: Optional[int] = 1,
+        custom_yearly_tenors: Optional[List[int]] = None,
+    ) -> pd.DataFrame | Tuple[pd.DataFrame, ql.DiscountCurve | ql.ZeroCurve]:
+        price_cols = ["bid_price", "offer_price", "mid_price", "eod_price"]
+        required_cols = ["issue_date", "maturity_date", "int_rate"]
+        price_col_exists = any(item in curve_set_df.columns for item in price_cols)
+        missing_required_cols = [
+            item for item in required_cols if item not in curve_set_df.columns
+        ]
+
+        if not price_col_exists:
+            raise ValueError(
+                f"Build Spot Curve - Couldn't find a valid price col in your curve set df - one of {price_cols}"
+            )
+        if missing_required_cols:
+            raise ValueError(
+                f"Build Spot Curve - Missing required curve set cols: {missing_required_cols}"
+            )
+
+        price_col = next(
+            (item for item in price_cols if item in curve_set_df.columns), None
+        )
+        calendar = ql.UnitedStates(m=ql.UnitedStates.GovernmentBond)
+        today = calendar.adjust(pydatetime_to_quantlib_date(py_datetime=as_of_date))
+        ql.Settings.instance().evaluationDate = today
+
+        t_plus_2 = 2
+        bond_settlement_date = calendar.advance(today, ql.Period(t_plus_2, ql.Days))
+        frequency = ql.Semiannual
+        day_count = ql.ActualActual(ql.ActualActual.ISDA)
+        par = 100.0
+
+        bond_helpers = []
+        for _, row in curve_set_df.iterrows():
+            maturity = pydatetime_to_quantlib_date(row["maturity_date"])
+            if np.isnan(row["int_rate"]):
+                quote = ql.QuoteHandle(ql.SimpleQuote(row[price_col]))
+                tbill = ql.ZeroCouponBond(
+                    1,
+                    calendar,
+                    par,
+                    maturity,
+                    ql.ModifiedFollowing,
+                    100.0,
+                    bond_settlement_date,
+                )
+                helper = ql.BondHelper(quote, tbill)
+            else:
+                schedule = ql.Schedule(
+                    bond_settlement_date,
+                    maturity,
+                    ql.Period(frequency),
+                    calendar,
+                    ql.ModifiedFollowing,
+                    ql.ModifiedFollowing,
+                    ql.DateGeneration.Backward,
+                    False,
+                )
+                helper = ql.FixedRateBondHelper(
+                    ql.QuoteHandle(ql.SimpleQuote(row[price_col])),
+                    t_plus_2,
+                    100.0,
+                    schedule,
+                    [row["int_rate"] / 100],
+                    day_count,
+                    ql.ModifiedFollowing,
+                    par,
+                )
+
+            bond_helpers.append(helper)
+
+        ql_piecewise_methods = {
+            "ql_plld": ql.PiecewiseLogLinearDiscount,
+            "ql_lcd": ql.PiecewiseLogCubicDiscount,
+            "ql_lz": ql.PiecewiseLinearZero,
+            "ql_cz": ql.PiecewiseCubicZero,
+            "ql_lf": ql.PiecewiseLinearForward,
+            "ql_spd": ql.PiecewiseSplineCubicDiscount,
+            "ql_kz": ql.PiecewiseKrugerZero,
+            "ql_kld": ql.PiecewiseKrugerLogDiscount,
+            "ql_mcf": ql.PiecewiseConvexMonotoneForward,
+            "ql_mcz": ql.PiecewiseConvexMonotoneZero,
+            "ql_ncz": ql.PiecewiseNaturalCubicZero,
+            "ql_nlcd": ql.PiecewiseNaturalLogCubicDiscount,
+            "ql_lmlcd": ql.PiecewiseLogMixedLinearCubicDiscount,
+            "ql_pcz": ql.PiecewiseParabolicCubicZero,
+            "ql_mpcz": ql.PiecewiseMonotonicParabolicCubicZero,
+            "ql_lpcd": ql.PiecewiseLogParabolicCubicDiscount,
+            "ql_mlpcd": ql.PiecewiseMonotonicLogParabolicCubicDiscount,
+            "ql_f_ns": ql.NelsonSiegelFitting,
+            "ql_f_nss": ql.SvenssonFitting,
+            # "ql_f_np": ql.SimplePolynomialFitting,
+            "ql_f_es": ql.ExponentialSplinesFitting,
+            # "ql_f_cbs": ql.CubicBSplinesFitting,
+        }
+
+        spot_dfs: List[pd.DataFrame] = []
+        for bs_method in ql_bootstrap_interp_methods:
+            if bs_method.split("_")[1] == "f":
+                ql_fit_method = ql_piecewise_methods[bs_method]
+                curr_curve = ql.FittedBondDiscountCurve(
+                    bond_settlement_date, bond_helpers, day_count, ql_fit_method()
+                )
+                curr_curve.enableExtrapolation()
+            else:
+                curr_curve = ql_piecewise_methods[bs_method](
+                    bond_settlement_date, bond_helpers, day_count
+                )
+                curr_curve.enableExtrapolation()
+            if interpolated_months_num or custom_yearly_tenors:
+                curr_spot_df = self._calc_spot_rates_intep_months(
+                    yield_curve=curr_curve,
+                    on_rate=on_rate,
+                    months=interpolated_months_num,
+                    freq=interpolated_curve_yearly_freq,
+                    custom_tenors=(
+                        [i * 12 for i in custom_yearly_tenors]
+                        if custom_yearly_tenors
+                        else None
+                    ),
+                )
+            else:
+                curr_spot_df = self._calc_spot_rates_on_tenors(
+                    yield_curve=curr_curve, on_rate=on_rate
+                )
+
+            spot_dfs.append(curr_spot_df)
+
+        if len(spot_dfs) == 1:
+            zero_rates_df = spot_dfs[0]
+        else:
+            maturity_dates = spot_dfs[0]["maturity_date"].to_list()
+            tenors = spot_dfs[0]["time_to_maturity"].to_list()
+            merged_df = pd.concat([df["spot_rate"] for df in spot_dfs], axis=1)
+            zero_rates_df = pd.DataFrame(
+                {
+                    "maturity_date": maturity_dates,
+                    "time_to_maturity": tenors,
+                    "spot_rate": merged_df.mean(axis=1).to_list(),
+                }
+            )
+
+        if retrun_ql_zero_curve:
+            if len(ql_bootstrap_interp_methods) > 1:
+                self._logger.warn(
+                    "Get Spot Rates - multiple bs methods passed - returning ql zero curve based on first bs method"
+                )
+            bs_method = ql_bootstrap_interp_methods[0]
+            if bs_method.split("_")[1] == "f":
+                ql_fit_method = ql_piecewise_methods[bs_method]
+                zero_curve = ql.FittedBondDiscountCurve(
+                    bond_settlement_date, bond_helpers, day_count, ql_fit_method()
+                )
+            else:
+                zero_curve = ql_piecewise_methods[bs_method](
+                    bond_settlement_date, bond_helpers, day_count
+                )
+            zero_curve.enableExtrapolation()
+            return zero_rates_df, zero_curve
+
+        return zero_rates_df
+
+    def get_par_rates(
+        self,
+        spot_rates: List[float],
+        tenors: List[int],
+        select_every_nth_spot_rate: Optional[int] = None,
+    ) -> pd.DataFrame:
+        if select_every_nth_spot_rate:
+            spot_rates = spot_rates[::select_every_nth_spot_rate]
+        par_rates = []
+        for tenor in tenors:
+            periods = np.arange(0, tenor + 0.5, 0.5)
+            curr_spot_rates = spot_rates[: len(periods)].copy()
+            discount_factors = [
+                1 / (1 + (s / 100) / 2) ** (2 * t)
+                for s, t in zip(curr_spot_rates, periods)
+            ]
+            sum_of_dfs = sum(discount_factors[:-1])
+            par_rate = (1 - discount_factors[-1]) / sum_of_dfs * 2
+            par_rates.append(par_rate * 100)
+
+        return pd.DataFrame(
+            {
+                "tenor": tenors,
+                "par_rate": par_rates,
+            }
+        )
