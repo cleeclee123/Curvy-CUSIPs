@@ -25,6 +25,8 @@ import scipy.interpolate
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from models.MonotoneConvex import MonotoneConvex
 
+# TODO
+# explore numba
 class CurveInterpolator:
     # all have to exist in curve_set
     _required_cols = [
@@ -174,6 +176,20 @@ class CurveInterpolator:
             ]
 
         return ynew
+    
+    def linear_interpolator(self, input_x) -> Callable:
+        func_no_extrap = scipy.interpolate.interp1d(
+            self._x, self._y, kind="linear", bounds_error=False
+        )
+        func_extrap = scipy.interpolate.interp1d(
+            self._x,
+            self._y,
+            axis=0,
+            kind="linear",
+            bounds_error=False,
+            fill_value="extrapolate",
+        )
+        
 
     def _log_linear_interpolation(self) -> np.ndarray:
         log_x = np.log(self._x)

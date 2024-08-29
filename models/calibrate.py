@@ -25,10 +25,6 @@ def _assert_same_shape(t: np.ndarray, y: np.ndarray) -> None:
 def betas_ns_ols(
     tau: float, t: np.ndarray, y: np.ndarray
 ) -> Tuple[NelsonSiegelCurve, Any]:
-    """Calculate the best-fitting beta-values given tau
-    for time-value pairs t and y and return a corresponding
-    Nelson-Siegel curve instance.
-    """
     _assert_same_shape(t, y)
     curve = NelsonSiegelCurve(0, 0, 0, tau)
     factors = curve.factor_matrix(t)
@@ -38,10 +34,6 @@ def betas_ns_ols(
 
 
 def errorfn_ns_ols(tau: float, t: np.ndarray, y: np.ndarray) -> float:
-    """Sum of squares error function for a Nelson-Siegel model and
-    time-value pairs t and y. All betas are obtained by ordinary
-    least squares given tau.
-    """
     _assert_same_shape(t, y)
     curve, lstsq_res = betas_ns_ols(tau, t, y)
     return np.sum((curve(t) - y) ** 2)
@@ -50,10 +42,6 @@ def errorfn_ns_ols(tau: float, t: np.ndarray, y: np.ndarray) -> float:
 def calibrate_ns_ols(
     t: np.ndarray, y: np.ndarray, tau0: float = 2.0
 ) -> Tuple[NelsonSiegelCurve, Any]:
-    """Calibrate a Nelson-Siegel curve to time-value pairs
-    t and y, by optimizing tau and chosing all betas
-    using ordinary least squares.
-    """
     _assert_same_shape(t, y)
     opt_res = minimize(errorfn_ns_ols, x0=tau0, args=(t, y))
     curve, lstsq_res = betas_ns_ols(opt_res.x[0], t, y)
@@ -63,18 +51,12 @@ def calibrate_ns_ols(
 def empirical_factors(
     y_3m: float, y_2y: float, y_10y: float
 ) -> Tuple[float, float, float]:
-    """Calculate the empirical factors according to
-    Diebold and Li (2006)."""
     return y_10y, y_10y - y_3m, 2 * y_2y - y_3m - y_10y
 
 
 def betas_nss_ols(
     tau: Tuple[float, float], t: np.ndarray, y: np.ndarray
 ) -> Tuple[NelsonSiegelSvenssonCurve, Any]:
-    """Calculate the best-fitting beta-values given tau (= array of tau1
-    and tau2) for time-value pairs t and y and return a corresponding
-    Nelson-Siegel-Svensson curve instance.
-    """
     _assert_same_shape(t, y)
     curve = NelsonSiegelSvenssonCurve(0, 0, 0, 0, tau[0], tau[1])
     factors = curve.factor_matrix(t)
@@ -87,11 +69,6 @@ def betas_nss_ols(
 
 
 def errorfn_nss_ols(tau: Tuple[float, float], t: np.ndarray, y: np.ndarray) -> float:
-    """Sum of squares error function for a Nelson-Siegel-Svensson
-    model and time-value pairs t and y. All betas are obtained
-    by ordinary least squares given tau (= array of tau1
-    and tau2).
-    """
     _assert_same_shape(t, y)
     curve, lstsq_res = betas_nss_ols(tau, t, y)
     return np.sum((curve(t) - y) ** 2)
@@ -100,19 +77,13 @@ def errorfn_nss_ols(tau: Tuple[float, float], t: np.ndarray, y: np.ndarray) -> f
 def calibrate_nss_ols(
     t: np.ndarray, y: np.ndarray, tau0: Tuple[float, float] = (2.0, 5.0)
 ) -> Tuple[NelsonSiegelSvenssonCurve, Any]:
-    """Calibrate a Nelson-Siegel-Svensson curve to time-value
-    pairs t and y, by optimizing tau1 and tau2 and chosing
-    all betas using ordinary least squares. This method does
-    not work well regarding the recovery of true parameters.
-    """
     _assert_same_shape(t, y)
     opt_res = minimize(errorfn_nss_ols, x0=np.array(tau0), args=(t, y))
     curve, lstsq_res = betas_nss_ols(opt_res.x, t, y)
-    return curve, opt_res
+    return curve, opt_res, lstsq_res
 
 
 def errorfn_bc_ols(tau: float, t: np.ndarray, y: np.ndarray) -> float:
-    """Error function for the Bjork-Christensen OLS calibration."""
     curve, _ = betas_bc_ols(tau, t, y)
     estimated_yields = curve(t)
     return np.sum((estimated_yields - y) ** 2)
@@ -121,7 +92,6 @@ def errorfn_bc_ols(tau: float, t: np.ndarray, y: np.ndarray) -> float:
 def betas_bc_ols(
     tau: float, t: np.ndarray, y: np.ndarray
 ) -> Tuple[BjorkChristensenCurve, np.linalg.LinAlgError]:
-    """Compute the beta parameters for the Bjork-Christensen model using OLS."""
     curve = BjorkChristensenCurve(0, 0, 0, 0, tau)
     F = curve.factor_matrix(t)
     betas, _, _, _ = np.linalg.lstsq(F, y, rcond=None)
@@ -132,7 +102,6 @@ def betas_bc_ols(
 def calibrate_bc_ols(
     t: np.ndarray, y: np.ndarray, tau0: float = 1.0
 ) -> Tuple[BjorkChristensenCurve, Any]:
-    """Calibrate a Bjork-Christensen curve to time-value pairs t and y."""
     _assert_same_shape(t, y)
     opt_res = minimize(errorfn_bc_ols, x0=np.array([tau0]), args=(t, y))
     curve, lstsq_res = betas_bc_ols(opt_res.x[0], t, y)
@@ -142,7 +111,6 @@ def calibrate_bc_ols(
 def calibrate_bc_augmented_ols(
     maturities: npt.NDArray[np.float64], yields: npt.NDArray[np.float64]
 ) -> Tuple[BjorkChristensenAugmentedCurve, Any]:
-    """Fit the Bjork-Christensen Augmented model to the given yields."""
 
     def objective(params: npt.NDArray[np.float64]) -> float:
         beta0, beta1, beta2, beta3, beta4, tau = params
@@ -169,8 +137,6 @@ def calibrate_bc_augmented_ols(
 def calibrate_diebold_li_ols(
     maturities: npt.NDArray[np.float64], yields: npt.NDArray[np.float64]
 ) -> Tuple[DieboldLiCurve, Any]:
-    """Fit the Diebold-Li model to the given yields."""
-    # Initial guesses for beta0, beta1, beta2, and lambda_
     initial_guess = [np.mean(yields), -0.02, 0.02, 0.1]
 
     def objective(params: npt.NDArray[np.float64]) -> float:
@@ -193,7 +159,7 @@ def calibrate_mles_ols(
 ) -> Tuple[MerrillLynchExponentialSplineModel, Any]:
     if maturities[0] != 0:
         short_rate = overnight_rate or yields[0]
-        maturities = np.insert(maturities, 0, 0)
+        maturities = np.insert(maturities, 0, 1/365)
         yields = np.insert(yields, 0, short_rate)
 
     """Fit the MLES model to the given yields using OLS."""
@@ -204,19 +170,14 @@ def calibrate_mles_ols(
         lambda_hat = np.array(params[1:])
         curve = MerrillLynchExponentialSplineModel(alpha, N, lambda_hat)
         curve.fit(np.array(maturities), np.array(yields), np.eye(len(maturities)))
-
         theoretical_yields = curve.theoretical_yields(np.array(maturities))
-
-        # Regularization to penalize large gradients (especially at the front end)
         regularization_term = regularization * np.sum(np.diff(lambda_hat) ** 2)
 
         return (
             np.sum((theoretical_yields - np.array(yields)) ** 2) + regularization_term
         )
 
-    # Optimize alpha and lambda_hat
     result = minimize(objective, initial_guess, method="BFGS")
-
     optimized_params = result.x
     optimized_alpha = optimized_params[0]
     optimized_lambda_hat = np.array(optimized_params[1:])

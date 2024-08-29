@@ -11,7 +11,9 @@ class DieboldLiCurve:
         self.lambda_ = lambda_
 
     def yield_curve(self, tau: np.ndarray) -> np.ndarray:
-        """Calculate the yield curve given the maturities (tau)."""
+        small_value = 1e-6  
+        tau = np.maximum(tau, small_value)
+
         term1 = self.beta0
         term2 = self.beta1 * (1 - np.exp(-self.lambda_ * tau)) / (self.lambda_ * tau)
         term3 = self.beta2 * (
@@ -21,5 +23,4 @@ class DieboldLiCurve:
         return term1 + term2 + term3
 
     def __call__(self, tau: np.ndarray) -> np.ndarray:
-        """Allow the class instance to be called directly to compute the yield curve."""
         return self.yield_curve(tau)

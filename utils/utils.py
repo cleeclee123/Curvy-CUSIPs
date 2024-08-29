@@ -105,15 +105,15 @@ def get_last_n_off_the_run_cusips(
         & (auctions_df["security_type"] != "FRN Bond")
         & (auctions_df["security_type"] != "CMB")
     ]
-    auctions_df = auctions_df.drop(
-        auctions_df[
-            (auctions_df["security_type"] == "Bill")
-            & (
-                auctions_df["original_security_term"]
-                != auctions_df["security_term_week_year"]
-            )
-        ].index
-    )
+    # auctions_df = auctions_df.drop(
+    #     auctions_df[
+    #         (auctions_df["security_type"] == "Bill")
+    #         & (
+    #             auctions_df["original_security_term"]
+    #             != auctions_df["security_term_week_year"]
+    #         )
+    #     ].index
+    # )
     auctions_df["auction_date"] = pd.to_datetime(auctions_df["auction_date"])
     auctions_df["issue_date"] = pd.to_datetime(auctions_df["issue_date"])
     current_date = as_of_date
@@ -142,6 +142,7 @@ def get_last_n_off_the_run_cusips(
     }
 
     on_the_run = auctions_df.groupby("original_security_term").first().reset_index()
+    on_the_run = on_the_run[(on_the_run["security_type"] == "Note") | (on_the_run["security_type"] == "Bond")] 
     on_the_run_result = on_the_run[
         [
             "original_security_term",
@@ -152,9 +153,23 @@ def get_last_n_off_the_run_cusips(
         ]
     ]
     
+    on_the_run_bills = auctions_df.groupby("security_term").first().reset_index()
+    on_the_run_bills = on_the_run_bills[on_the_run_bills["security_type"] == "Bill"] 
+    on_the_run_result_bills = on_the_run_bills[
+        [
+            "original_security_term",
+            "security_type",
+            "cusip",
+            "auction_date",
+            "issue_date",
+        ]
+    ]
+    
+    on_the_run = pd.concat([on_the_run_result_bills, on_the_run_result])
+    
     if n == 0:
-        return on_the_run_result 
-
+        return on_the_run
+    
     off_the_run = auctions_df[~auctions_df.index.isin(on_the_run.index)]
     off_the_run_result = (
         off_the_run.groupby("original_security_term")
@@ -352,8 +367,10 @@ def historical_auction_cols():
     ]
 
 
-def ust_labeler(mat_date: datetime | pd.Timestamp):
-    return mat_date.strftime("%b %y") + "s"
+def ust_labeler(row: pd.Series):
+    mat_date = row["maturity_date"]
+    tenor = row["original_security_term"]
+    return mat_date.strftime("%b %y") + "s" + ", " + tenor
 
 
 def ust_sorter(term: str):

@@ -77,7 +77,7 @@ class QL_BondPricer:
             False,
         )
 
-        settlement_days = 2
+        settlement_days = 1
         bond = ql.FixedRateBond(
             settlement_days, 100.0, schedule, [coupon_rate], day_count
         )
