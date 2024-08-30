@@ -142,7 +142,10 @@ def get_last_n_off_the_run_cusips(
     }
 
     on_the_run = auctions_df.groupby("original_security_term").first().reset_index()
-    on_the_run = on_the_run[(on_the_run["security_type"] == "Note") | (on_the_run["security_type"] == "Bond")] 
+    on_the_run = on_the_run[
+        (on_the_run["security_type"] == "Note")
+        | (on_the_run["security_type"] == "Bond")
+    ]
     on_the_run_result = on_the_run[
         [
             "original_security_term",
@@ -152,9 +155,9 @@ def get_last_n_off_the_run_cusips(
             "issue_date",
         ]
     ]
-    
+
     on_the_run_bills = auctions_df.groupby("security_term").first().reset_index()
-    on_the_run_bills = on_the_run_bills[on_the_run_bills["security_type"] == "Bill"] 
+    on_the_run_bills = on_the_run_bills[on_the_run_bills["security_type"] == "Bill"]
     on_the_run_result_bills = on_the_run_bills[
         [
             "original_security_term",
@@ -164,12 +167,12 @@ def get_last_n_off_the_run_cusips(
             "issue_date",
         ]
     ]
-    
+
     on_the_run = pd.concat([on_the_run_result_bills, on_the_run_result])
-    
+
     if n == 0:
         return on_the_run
-    
+
     off_the_run = auctions_df[~auctions_df.index.isin(on_the_run.index)]
     off_the_run_result = (
         off_the_run.groupby("original_security_term")
@@ -381,6 +384,7 @@ def ust_sorter(term: str):
     unit_multiplier = {"Year": 365, "Month": 30, "Week": 7, "Day": 1}
     return num * unit_multiplier[unit]
 
+
 def get_otr_cusips_by_date(
     historical_auctions_df: pd.DataFrame, dates: list, use_issue_date: bool = True
 ):
@@ -470,5 +474,27 @@ def get_otr_date_ranges(
 def pydatetime_to_quantlib_date(py_datetime: datetime) -> ql.Date:
     return ql.Date(py_datetime.day, py_datetime.month, py_datetime.year)
 
+
 def quantlib_date_to_pydatetime(ql_date: ql.Date):
     return datetime(ql_date.year(), ql_date.month(), ql_date.dayOfMonth())
+
+
+def get_isin_from_cusip(cusip_str, country_code: str = "US"):
+    """
+    >>> get_isin_from_cusip('037833100', 'US')
+    'US0378331005'
+    """
+    isin_to_digest = country_code + cusip_str.upper()
+
+    get_numerical_code = lambda c: str(ord(c) - 55)
+    encode_letters = lambda c: c if c.isdigit() else get_numerical_code(c)
+    to_digest = "".join(map(encode_letters, isin_to_digest))
+
+    ints = [int(s) for s in to_digest[::-1]]
+    every_second_doubled = [x * 2 for x in ints[::2]] + ints[1::2]
+
+    sum_digits = lambda i: sum(divmod(i, 10))
+    digit_sum = sum([sum_digits(i) for i in every_second_doubled])
+
+    check_digit = (10 - digit_sum % 10) % 10
+    return isin_to_digest + str(check_digit)
