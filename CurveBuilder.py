@@ -461,6 +461,7 @@ def get_par_rates(
     )
 
 
+# TODO match ql interp method with scipy interp func
 def get_spot_rates_fitter(
     curve_set_df: pd.DataFrame,
     as_of_date: datetime,
@@ -468,8 +469,9 @@ def get_spot_rates_fitter(
     ql_fitting_methods: Optional[
         List[
             Literal[
+                "ql_f_ns",
                 "ql_f_nss",
-                "ql_f_np",
+                "ql_f_sp",
                 "ql_f_es",
                 "ql_f_cbs",
             ]
@@ -485,11 +487,13 @@ def get_spot_rates_fitter(
         ]
     ] = None,
     daily_interpolation: Optional[bool] = False,
+    simple_poly: Optional[int] = None,
+    knots: Optional[List[float]] = None,
 ):
     ql_fitting_methods_dict: Dict[str, ql.DiscountCurve | ql.ZeroCurve] = {
         "ql_f_ns": ql.NelsonSiegelFitting,
         "ql_f_nss": ql.SvenssonFitting,
-        "ql_f_np": ql.SimplePolynomialFitting,
+        "ql_f_sp": ql.SimplePolynomialFitting,
         "ql_f_es": ql.ExponentialSplinesFitting,
         "ql_f_cbs": ql.CubicBSplinesFitting,
     }
@@ -572,9 +576,25 @@ def get_spot_rates_fitter(
 
     ql_curves: Dict[str, Dict[str, ql.DiscountCurve | ql.ZeroCurve | pd.DataFrame]] = {}
     for fit_method in ql_fitting_methods:
+        if fit_method == "ql_f_sp" and not simple_poly:
+            continue
+        if fit_method == "ql_f_cbs" and not knots:
+            continue
+        
         ql_fit_method = ql_fitting_methods_dict[fit_method]
+        
+        if fit_method == "ql_f_sp":
+            called_ql_fit_method = ql_fit_method(simple_poly) 
+        elif fit_method == "ql_f_cbs":
+            called_ql_fit_method = ql_fit_method(knots) 
+        else:
+            called_ql_fit_method = ql_fit_method()
+        
         curr_curve = ql.FittedBondDiscountCurve(
-            bond_settlement_date, bond_helpers, day_count, ql_fit_method()
+            bond_settlement_date,
+            bond_helpers,
+            day_count,
+            called_ql_fit_method
         )
         curr_curve.enableExtrapolation()
         if fit_method not in ql_curves:
@@ -639,10 +659,9 @@ def get_spot_rates_fitter(
     return ql_curves
 
 
-# TODO match ql interp method with scipy interp func
-def reprice_bonds(
+def reprice_bonds_single_zero_curve(
     as_of_date: datetime, ql_zero_curve: ql.ZeroCurve, curve_set_df: pd.DataFrame
-):
+) -> pd.DataFrame:
     yield_curve_handle = ql.YieldTermStructureHandle(ql_zero_curve)
     engine = ql.DiscountingBondEngine(yield_curve_handle)
 
@@ -789,6 +808,167 @@ def reprice_bonds(
                     "ytm_spread": (row[yield_col] - curr_calced_ytm) * 100,
                 }
             )
+        except Exception as e:
+            print(row["cusip"], e)
+
+    return pd.DataFrame(bonds)
+
+
+def reprice_bonds(
+    as_of_date: datetime,
+    ql_zero_curves: Dict[str, ql.ZeroCurve],
+    curve_set_df: pd.DataFrame,
+):
+    price_cols = ["bid_price", "offer_price", "mid_price", "eod_price"]
+    required_cols = ["issue_date", "maturity_date", "int_rate"]
+    price_col_exists = any(item in curve_set_df.columns for item in price_cols)
+    missing_required_cols = [
+        item for item in required_cols if item not in curve_set_df.columns
+    ]
+
+    if not price_col_exists:
+        raise ValueError(
+            f"Build Spot Curve - Couldn't find a valid price col in your curve set df - one of {price_cols}"
+        )
+    if missing_required_cols:
+        raise ValueError(
+            f"Build Spot Curve - Missing required curve set cols: {missing_required_cols}"
+        )
+
+    price_col = next(
+        (item for item in price_cols if item in curve_set_df.columns), None
+    )
+    quote_type = price_col.split("_")[0]
+    yield_col = f"{quote_type}_yield"
+
+    if yield_col not in curve_set_df.columns:
+        raise ValueError(
+            f"Build Spot Curve - Missing required curve set cols: {yield_col}"
+        )
+
+    calendar = ql.UnitedStates(m=ql.UnitedStates.GovernmentBond)
+    today = calendar.adjust(pydatetime_to_quantlib_date(py_datetime=as_of_date))
+    ql.Settings.instance().evaluationDate = today
+
+    t_plus = 1
+    bond_settlement_date = calendar.advance(today, ql.Period(t_plus, ql.Days))
+    frequency = ql.Semiannual
+    day_count = ql.ActualActual(ql.ActualActual.ISDA)
+    par = 100.0
+
+    bonds: List[Dict[str, ql.FixedRateBond | ql.ZeroCouponBond]] = []
+    for _, row in curve_set_df.iterrows():
+        try:
+            maturity = pydatetime_to_quantlib_date(row["maturity_date"])
+            if np.isnan(row["int_rate"]):
+                bond_ql = ql.ZeroCouponBond(
+                    t_plus,
+                    calendar,
+                    par,
+                    maturity,
+                    ql.ModifiedFollowing,
+                    100.0,
+                    bond_settlement_date,
+                )
+                bond_rl: rl.FixedRateBond = rl.Bill(
+                    termination=row["maturity_date"],
+                    effective=row["issue_date"],
+                    calendar="nyc",
+                    modifier="NONE",
+                    currency="usd",
+                    convention="Act360",
+                    settle=1,
+                    curves="bill_curve",
+                    calc_mode="us_gbb",
+                )
+            else:
+                schedule = ql.Schedule(
+                    bond_settlement_date,
+                    maturity,
+                    ql.Period(frequency),
+                    calendar,
+                    ql.ModifiedFollowing,
+                    ql.ModifiedFollowing,
+                    ql.DateGeneration.Backward,
+                    False,
+                )
+                bond_ql = ql.FixedRateBond(
+                    t_plus,
+                    100.0,
+                    schedule,
+                    [row["int_rate"] / 100],
+                    day_count,
+                    ql.ModifiedFollowing,
+                )
+                bond_rl: rl.FixedRateBond = rl.FixedRateBond(
+                    effective=row["issue_date"],
+                    termination=row["maturity_date"],
+                    fixed_rate=row["int_rate"],
+                    spec="ust",
+                    calc_mode="ust_31bii",
+                )
+
+            curr_accrued_amount = bond_rl.accrued(
+                quantlib_date_to_pydatetime(bond_settlement_date)
+            )
+            curr_row = {
+                "cusip": row["cusip"],
+                "label": row["label"],
+                "issue_date": row["issue_date"],
+                "maturity_date": row["maturity_date"],
+                "time_to_maturity": row["time_to_maturity"],
+                "high_investment_rate": row["high_investment_rate"],
+                "int_rate": row["int_rate"],
+                "rank": row["rank"] if "rank" in curve_set_df.columns else None,
+                "outstanding": (
+                    row["outstanding_amt"]
+                    if "outstanding_amt" in curve_set_df.columns
+                    else None
+                ),
+                "soma_holdings": (
+                    row["parValue"] if "parValue" in curve_set_df.columns else None
+                ),
+                "stripping_amount": (
+                    row["portion_stripped_amt"]
+                    if "portion_stripped_amt" in curve_set_df.columns
+                    else None
+                ),
+                "free_float": (
+                    row["free_float"] if "free_float" in curve_set_df.columns else None
+                ),
+                yield_col: row[yield_col],
+                price_col: row[price_col],
+                "accured": curr_accrued_amount,
+            }
+
+            for label, ql_zero_curve in ql_zero_curves.items():
+                yield_curve_handle = ql.YieldTermStructureHandle(ql_zero_curve)
+                engine = ql.DiscountingBondEngine(yield_curve_handle)
+                bond_ql.setPricingEngine(engine)
+                curr_calced_npv = bond_ql.NPV()
+                curr_calced_ytm = (
+                    bond_ql.bondYield(
+                        curr_calced_npv,
+                        day_count,
+                        ql.Compounded,
+                        frequency,
+                        bond_settlement_date,
+                    )
+                    * 100
+                )
+
+                curr_price_spread = (
+                    row[price_col] + curr_accrued_amount - curr_calced_npv
+                )
+                curr_ytm_spread = (row[yield_col] - curr_calced_ytm) * 100
+
+                curr_row[f"{label}_repriced_npv"] = curr_calced_npv
+                curr_row[f"{label}_repriced_ytm"] = curr_calced_ytm
+                curr_row[f"{label}_price_spread"] = curr_price_spread
+                curr_row[f"{label}_ytm_spread"] = curr_ytm_spread
+
+            bonds.append(curr_row)
+
         except Exception as e:
             print(row["cusip"], e)
 

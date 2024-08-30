@@ -5,9 +5,9 @@ import multiprocessing as mp
 import time
 import warnings
 from collections import defaultdict
-from datetime import datetime 
+from datetime import datetime
 from functools import partial, reduce
-from typing import Dict, List, Optional, Tuple 
+from typing import Dict, List, Optional, Tuple
 import os
 import aiohttp
 import httpx
@@ -115,8 +115,10 @@ def calculate_yields(row, as_of_date, use_quantlib=False):
 
     return offer_yield, bid_yield, eod_yield
 
-# BIG TODO - find additional source for ust outstanding amount
 
+# TODO
+# - find additional source for ust outstanding amount
+# - public.com scrape
 class CurveDataFetcher:
     _use_ust_issue_date: bool = False
     _global_timeout: int = 10
@@ -124,6 +126,7 @@ class CurveDataFetcher:
     _fred: Fred = None
     _proxies: Dict[str, str] = {"http": None, "https": None}
     _httpx_proxies: Dict[str, str] = {"http://": None, "https://": None}
+    _public_dotcom_jwt: str = None
 
     _logger = logging.getLogger(__name__)
     _debug_verbose: bool = False
@@ -152,6 +155,8 @@ class CurveDataFetcher:
 
         if fred_api_key:
             self._fred = Fred(api_key=fred_api_key, proxies=self._proxies)
+
+        self._public_dotcom_jwt = self._fetch_public_dotcome_jwt()
 
         self._debug_verbose = debug_verbose
         self._error_verbose = error_verbose
@@ -925,6 +930,7 @@ class CurveDataFetcher:
                 "asOfDate",
                 "parValue",
                 "percentOutstanding",
+                "est_outstanding_amt",
                 "changeFromPriorWeek",
                 "changeFromPriorYear",
             ]
@@ -953,11 +959,9 @@ class CurveDataFetcher:
                 curr_soma_holdings_df["percentOutstanding"] = pd.to_numeric(
                     curr_soma_holdings_df["percentOutstanding"], errors="coerce"
                 )
-                curr_soma_holdings_df["changeFromPriorWeek"] = pd.to_numeric(
-                    curr_soma_holdings_df["changeFromPriorWeek"], errors="coerce"
-                )
-                curr_soma_holdings_df["changeFromPriorYear"] = pd.to_numeric(
-                    curr_soma_holdings_df["changeFromPriorYear"], errors="coerce"
+                curr_soma_holdings_df["est_outstanding_amt"] = (
+                    curr_soma_holdings_df["parValue"]
+                    / curr_soma_holdings_df["percentOutstanding"]
                 )
                 curr_soma_holdings_df = curr_soma_holdings_df[
                     (curr_soma_holdings_df["securityType"] != "TIPS")
@@ -985,6 +989,102 @@ class CurveDataFetcher:
         ]
         return tasks
 
+    async def _build_fetch_tasks_historical_amount_outstanding(
+        self,
+        client: httpx.AsyncClient,
+        dates: List[datetime],
+        only_marketable: Optional[bool] = False,
+        uid: Optional[str | int] = None,
+    ):
+        async def fetch_mspd_table_3_market(
+            client: httpx.AsyncClient,
+            date: datetime,
+            uid: Optional[str | int] = None,
+        ):
+            cols_to_return = [
+                "cusip",
+                "issued_amt",
+                "redeemed_amt",
+                "outstanding_amt",
+            ]
+            try:
+                last_n_months_last_business_days: List[datetime] = (
+                    last_day_n_months_ago(date, n=2, return_all=True)
+                )
+                self._logger.debug(
+                    f"UST Outstanding - BDays: {last_n_months_last_business_days}"
+                )
+                dates_str_query = ",".join(
+                    [
+                        date.strftime("%Y-%m-%d")
+                        for date in last_n_months_last_business_days
+                    ]
+                )
+                if only_marketable:
+                    url = f"https://api.fiscaldata.treasury.gov/services/api/fiscal_service/v1/debt/mspd/mspd_table_3_market?filter=record_date:in:({dates_str_query})&page[number]=1&page[size]=10000"
+                else:
+                    url = f"https://api.fiscaldata.treasury.gov/services/api/fiscal_service/v1/debt/mspd/mspd_table_3?filter=record_date:in:({dates_str_query})&page[number]=1&page[size]=10000"
+
+                self._logger.debug(f"UST Outstanding - {date} url: {url}")
+                response = await client.get(
+                    url,
+                    headers=build_treasurydirect_header(
+                        host_str="api.fiscaldata.treasury.gov"
+                    ),
+                )
+                response.raise_for_status()
+                ust_outstanding_json = response.json()
+                ust_outstanding_df = pd.DataFrame(ust_outstanding_json["data"])
+
+                col1 = "cusip"
+                col2 = "security_class2_desc"
+                ust_outstanding_df.columns = [
+                    col2 if col == col1 else col1 if col == col2 else col
+                    for col in ust_outstanding_df.columns
+                ]
+
+                ust_outstanding_df["record_date"] = pd.to_datetime(
+                    ust_outstanding_df["record_date"], errors="coerce"
+                )
+                latest_date = ust_outstanding_df["record_date"].max()
+                print(f"Using Outstanding Amount Data As of {latest_date}")
+                ust_outstanding_df = ust_outstanding_df[
+                    ust_outstanding_df["record_date"] == latest_date
+                ]
+
+                for col in cols_to_return[1:]:
+                    ust_outstanding_df[col] = pd.to_numeric(
+                        ust_outstanding_df[col], errors="coerce"
+                    )
+
+                ust_outstanding_df = ust_outstanding_df[
+                    ust_outstanding_df["cusip"].apply(is_valid_ust_cusip)
+                ]
+
+                if uid:
+                    return date, ust_outstanding_df[cols_to_return], uid
+                return date, ust_outstanding_df[cols_to_return]
+
+            except httpx.HTTPStatusError as e:
+                self._logger.error(
+                    f"UST Outstanding - Bad Status: {response.status_code}"
+                )
+                if uid:
+                    return date, pd.DataFrame(columns=cols_to_return), uid
+                return date, pd.DataFrame(columns=cols_to_return)
+
+            except Exception as e:
+                self._logger.error(f"UST Outstanding - Error: {str(e)}")
+                if uid:
+                    return date, pd.DataFrame(columns=cols_to_return), uid
+                return date, pd.DataFrame(columns=cols_to_return)
+
+        tasks = [
+            fetch_mspd_table_3_market(client=client, date=date, uid=uid)
+            for date in dates
+        ]
+        return tasks
+
     async def _build_fetch_tasks_historical_stripping_activity(
         self,
         client: httpx.AsyncClient,
@@ -998,7 +1098,8 @@ class CurveDataFetcher:
         ):
             cols_to_return = [
                 "cusip",
-                "outstanding_amt",
+                "corpus_cusip",
+                "outstanding_amt",  # not using this col since not all USTs have stripping activity - using MSPD table 3 for "outstanding_amt"
                 "portion_unstripped_amt",
                 "portion_stripped_amt",
                 "reconstituted_amt",
@@ -1060,6 +1161,7 @@ class CurveDataFetcher:
                     col2 if col == col1 else col1 if col == col2 else col
                     for col in curr_stripping_activity_df.columns
                 ]
+                curr_stripping_activity_df = curr_stripping_activity_df.rename(columns={"security_class2_desc": "corpus_cusip"}) 
 
                 if uid:
                     return date, curr_stripping_activity_df[cols_to_return], uid
@@ -1447,6 +1549,8 @@ class CurveDataFetcher:
         include_auction_results: Optional[bool] = False,
         include_soma_holdings: Optional[bool] = False,
         include_stripping_activity: Optional[bool] = False,
+        # include_outstanding_amt: Optional[bool] = False,
+        # exclude_nonmarketable_outstanding_amt: Optional[bool] = False,
         # auctions_df: Optional[pd.DataFrame] = None,
         sorted: Optional[bool] = False,
         use_github: Optional[bool] = False,
@@ -1475,6 +1579,7 @@ class CurveDataFetcher:
                 include_auction_results = True
                 include_soma_holdings = True
                 include_stripping_activity = True
+                # include_outstanding_amt = True
 
         async def gather_tasks(client: httpx.AsyncClient, as_of_date: datetime):
             ust_historical_prices_tasks = (
@@ -1517,6 +1622,13 @@ class CurveDataFetcher:
                 tasks += await self._build_fetch_tasks_historical_stripping_activity(
                     client=client, dates=[as_of_date], uid="ust_stripping"
                 )
+            # if include_outstanding_amt:
+            #     tasks += await self._build_fetch_tasks_historical_amount_outstanding(
+            #         client=client,
+            #         dates=[as_of_date],
+            #         uid="ust_outstanding_amt",
+            #         only_marketable=exclude_nonmarketable_outstanding_amt,
+            #     )
 
             return await asyncio.gather(*tasks)
 
@@ -1536,7 +1648,10 @@ class CurveDataFetcher:
             if uid == "ust_auctions":
                 auctions_dfs.append(tup[0])
             elif (
-                uid == "ust_prices" or uid == "soma_holdings" or uid == "ust_stripping"
+                uid == "ust_prices"
+                or uid == "soma_holdings"
+                or uid == "ust_stripping"
+                or uid == "ust_outstanding_amt"
             ):
                 dfs.append(tup[1])
             else:
@@ -1677,3 +1792,147 @@ class CurveDataFetcher:
             )
 
         return merged_df
+
+    def _fetch_public_dotcome_jwt(self) -> str:
+        try:
+            jwt_headers = {
+                "authority": "prod-api.154310543964.hellopublic.com",
+                "method": "GET",
+                "path": "/static/anonymoususer/credentials.json",
+                "scheme": "https",
+                "accept": "*/*",
+                "accept-encoding": "gzip, deflate, br, zstd",
+                "accept-language": "en-US,en;q=0.9",
+                "cache-control": "no-cache",
+                "content-type": "application/json",
+                "dnt": "1",
+                "origin": "https://public.com",
+                "pragma": "no-cache",
+                "priority": "u=1, i",
+                "sec-ch-ua": '"Chromium";v="128", "Not;A=Brand";v="24", "Google Chrome";v="128"',
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"Windows"',
+                "sec-fetch-dest": "empty",
+                "sec-fetch-mode": "cors",
+                "sec-fetch-site": "cross-site",
+                "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+                "x-app-version": "web-1.0.9",
+            }
+            jwt_url = "https://prod-api.154310543964.hellopublic.com/static/anonymoususer/credentials.json"
+            jwt_res = requests.get(jwt_url, headers=jwt_headers)
+            jwt_str = jwt_res.json()["jwt"]
+            return jwt_str
+        except Exception as e:
+            self._logger.error(f"Public.com JWT Request Failed: {e}")
+            return None
+
+    def public_dotcom_api(
+        self,
+        cusips: List[str],
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        refresh_jwt: Optional[bool] = False,
+    ):
+        if refresh_jwt or not self._public_dotcom_jwt:
+            self._public_dotcom_jwt = self._fetch_public_dotcome_jwt()
+            if not self._public_dotcom_jwt:
+                raise ValueError("Public.com JWT Request Failed")
+
+        async def fetch_cusip_public_dotcom(
+            client: httpx.AsyncClient,
+            cusip: str,
+            jwt_str: str,
+            start_date: Optional[datetime] = None,
+            end_date: Optional[datetime] = None,
+        ):
+            cols_to_return = ["Date", "Price", "YTW"]
+            try:
+                span = "MAX"
+                data_headers = {
+                    "authority": "prod-api.154310543964.hellopublic.com",
+                    "method": "GET",
+                    "path": f"/fixedincomegateway/v1/graph/data?cusip={cusip}&span={span}",
+                    "scheme": "https",
+                    "accept": "*/*",
+                    "accept-encoding": "gzip, deflate, br, zstd",
+                    "accept-language": "en-US,en;q=0.9",
+                    "cache-control": "no-cache",
+                    "content-type": "application/json",
+                    "dnt": "1",
+                    "origin": "https://public.com",
+                    "pragma": "no-cache",
+                    "priority": "u=1, i",
+                    "sec-ch-ua": '"Chromium";v="128", "Not;A=Brand";v="24", "Google Chrome";v="128"',
+                    "sec-ch-ua-mobile": "?0",
+                    "sec-ch-ua-platform": '"Windows"',
+                    "sec-fetch-dest": "empty",
+                    "sec-fetch-mode": "cors",
+                    "sec-fetch-site": "cross-site",
+                    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+                    "x-app-version": "web-1.0.9",
+                    "authorization": jwt_str,
+                }
+
+                data_url = f"https://prod-api.154310543964.hellopublic.com/fixedincomegateway/v1/graph/data?cusip={cusip}&span={span}"
+                response = await client.get(data_url, headers=data_headers)
+                response.raise_for_status()
+                df = pd.DataFrame(response.json()["data"])
+                df["timestamp"] = pd.to_datetime(df["timestamp"]).dt.date
+                df["unitPrice"] = pd.to_numeric(df["unitPrice"]) * 100
+                df["yieldToWorst"] = pd.to_numeric(df["yieldToWorst"]) * 100
+                df.columns = cols_to_return
+                if start_date and end_date:
+                    df = df[df["Date"] >= start_date]
+                if end_date:
+                    df = df[df["Date"] <= end_date]
+                return (cusip, df)
+
+            except httpx.HTTPStatusError as e:
+                self._logger.error(f"Public.com - Bad Status: {response.status_code}")
+                return cusip, pd.DataFrame(columns=cols_to_return)
+
+            except Exception as e:
+                self._logger.error(f"Public.com - Error: {str(e)}")
+                return cusip, pd.DataFrame(columns=cols_to_return)
+
+        async def build_tasks(
+            client: httpx.AsyncClient,
+            cusips: List[str],
+            start_date: datetime,
+            end_date: datetime,
+            jwt_str: str,
+        ):
+            tasks = [
+                fetch_cusip_public_dotcom(
+                    client=client,
+                    cusip=cusip,
+                    start_date=start_date,
+                    end_date=end_date,
+                    jwt_str=jwt_str,
+                )
+                for cusip in cusips
+            ]
+            return await asyncio.gather(*tasks)
+
+        async def run_fetch_all(
+            cusips: List[str], start_date: datetime, end_date: datetime, jwt_str: str
+        ):
+            async with httpx.AsyncClient(proxy=self._proxies["https"]) as client:
+                all_data = await build_tasks(
+                    client=client,
+                    cusips=cusips,
+                    start_date=start_date,
+                    end_date=end_date,
+                    jwt_str=jwt_str,
+                )
+                return all_data
+
+        dfs: List[Tuple[str, pd.DataFrame]] = asyncio.run(
+            run_fetch_all(
+                cusips=cusips,
+                start_date=start_date,
+                end_date=end_date,
+                jwt_str=self._public_dotcom_jwt,
+            )
+        )
+        return dict(dfs)
