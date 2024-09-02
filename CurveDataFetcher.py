@@ -1578,6 +1578,9 @@ class CurveDataFetcher:
             if "cusip" not in market_cols_to_return:
                 market_cols_to_return.insert(0, "cusip")
 
+        quote_type = (
+            market_cols_to_return[1].split("_")[0] if market_cols_to_return else "eod"
+        )
         filtered_free_float_df_col = False
         if calc_free_float:
             if not include_soma_holdings and not include_auction_results:
@@ -1589,7 +1592,8 @@ class CurveDataFetcher:
 
         async def gather_tasks(client: httpx.AsyncClient, as_of_date: datetime):
             if use_github:
-                ust_historical_prices_tasks= await self._build_fetch_tasks_historical_cusip_prices_github(
+                ust_historical_prices_tasks = (
+                    await self._build_fetch_tasks_historical_cusip_prices_github(
                         client=client,
                         dates=[as_of_date],
                         uid="ust_prices",
@@ -1609,11 +1613,29 @@ class CurveDataFetcher:
                             else market_cols_to_return
                         ),
                     )
+                )
+            elif use_public_dotcom:
+                cusips_to_fetch = get_active_cusips(
+                    historical_auctions_df=self._historical_auctions_df,
+                    as_of_date=as_of_date,
+                    use_issue_date=True,
+                )["cusip"].to_list()
+                ust_historical_prices_tasks = (
+                    await self._build_fetch_tasks_cusip_timeseries_public_dotcome(
+                        client=client,
+                        cusips=cusips_to_fetch,
+                        start_date=as_of_date,
+                        end_date=as_of_date,
+                        uid="ust_prices_public_dotcom",
+                    )
+                )
             else:
-                ust_historical_prices_tasks = await self._build_fetch_tasks_historical_cusip_prices(
+                ust_historical_prices_tasks = (
+                    await self._build_fetch_tasks_historical_cusip_prices(
                         client=client, dates=[as_of_date], uid="ust_prices"
                     )
-            
+                )
+
             tasks = ust_historical_prices_tasks
 
             if include_soma_holdings:
@@ -1645,10 +1667,22 @@ class CurveDataFetcher:
         results = asyncio.run(run_fetch_all(as_of_date=as_of_date))
         auctions_dfs = []
         dfs = []
+        public_dotcom_dicts: List[Dict[str, str]] = []
         for tup in results:
             uid = tup[-1]
             if uid == "ust_auctions":
                 auctions_dfs.append(tup[0])
+            elif uid == "ust_prices_public_dotcom" and use_public_dotcom:
+                if not isinstance(tup[1], pd.DataFrame):
+                    continue
+                if not tup[1].empty:
+                    public_dotcom_dicts.append(
+                        {
+                            "cusip": tup[0],
+                            f"{quote_type}_price": tup[1].iloc[-1]["Price"],
+                            f"{quote_type}_ytm": tup[1].iloc[-1]["YTM"],
+                        }
+                    )
             elif (
                 uid == "ust_prices"
                 or uid == "soma_holdings"
@@ -1697,12 +1731,16 @@ class CurveDataFetcher:
                     "corpus_cusip",
                 ]
             ]
-        merged_df = reduce(
-            lambda left, right: pd.merge(left, right, on="cusip", how="outer"), dfs
-        )
-        merged_df = pd.merge(left=auctions_df, right=merged_df, on="cusip", how="outer")
+        if not use_public_dotcom:
+            merged_df = reduce(
+                lambda left, right: pd.merge(left, right, on="cusip", how="outer"), dfs
+            )
+            merged_df = pd.merge(left=auctions_df, right=merged_df, on="cusip", how="outer")
+        else:
+            merged_df = pd.merge(left=auctions_df, right=pd.DataFrame(public_dotcom_dicts), on="cusip", how="outer")
+        
         merged_df = merged_df[merged_df["cusip"].apply(is_valid_ust_cusip)]
-
+            
         if calc_free_float:
             merged_df["parValue"] = pd.to_numeric(
                 merged_df["parValue"], errors="coerce"
@@ -1840,12 +1878,12 @@ class CurveDataFetcher:
         backoff_factor: Optional[int] = 1,
         uid: Optional[str | int] = None,
     ):
-        cols_to_return = ["Date", "Price", "YTM"] # YTW is same as YTM for cash USTs
+        cols_to_return = ["Date", "Price", "YTM"]  # YTW is same as YTM for cash USTs
         retries = 0
         try:
             if pd.isna(cusip) or not cusip:
-                raise ValueError(f"Public.com - invalid CUSIP passed") 
-            
+                raise ValueError(f"Public.com - invalid CUSIP passed")
+
             while retries < max_retries:
                 try:
                     span = "MAX"
@@ -1894,7 +1932,9 @@ class CurveDataFetcher:
                     self._logger.error(
                         f"Public.com - Bad Status for {cusip}: {response.status_code}"
                     )
-                    if response.status_code == 404 or response.status_code == 400: # public.com endpoint doesnt throw a 404 specifically
+                    if (
+                        response.status_code == 404 or response.status_code == 400
+                    ):  # public.com endpoint doesnt throw a 404 specifically
                         if uid:
                             return cusip, pd.DataFrame(columns=cols_to_return), uid
                         return cusip, pd.DataFrame(columns=cols_to_return)
@@ -1928,6 +1968,37 @@ class CurveDataFetcher:
     ):
         async with semaphore:
             return await self._fetch_cusip_timeseries_public_dotcom(*args, **kwargs)
+
+    async def _build_fetch_tasks_cusip_timeseries_public_dotcome(
+        self,
+        client: httpx.AsyncClient,
+        cusips: List[str],
+        start_date: datetime,
+        end_date: datetime,
+        uid: Optional[str | int] = None,
+        max_concurrent_tasks: int = 64,
+        refresh_jwt: Optional[bool] = False,
+    ):
+        if refresh_jwt or not self._public_dotcom_jwt:
+            self._public_dotcom_jwt = self._fetch_public_dotcome_jwt()
+            if not self._public_dotcom_jwt:
+                raise ValueError("Public.com JWT Request Failed")
+
+        semaphore = asyncio.Semaphore(max_concurrent_tasks)
+        tasks = [
+            self._fetch_cusip_timeseries_public_dotcome_with_semaphore(
+                semaphore=semaphore,
+                client=client,
+                cusip=cusip,
+                start_date=start_date,
+                end_date=end_date,
+                uid=uid,
+                jwt_str=self._public_dotcom_jwt,
+                max_retries=1,
+            )
+            for cusip in cusips
+        ]
+        return tasks
 
     def public_dotcom_timeseries_api(
         self,
@@ -2197,7 +2268,7 @@ class CurveDataFetcher:
             )
         )
         return dict(dfs)
-    
+
     # async def _fetch_cusip_timeseries_tradingview(
     #     self,
     #     client: httpx.AsyncClient,
@@ -2211,6 +2282,3 @@ class CurveDataFetcher:
     # ):
     #     if exchange == "EUROTLX":
     #         cusip = get_isin_from_cusip(cusip_str=cusip)
-        
-        
-        
