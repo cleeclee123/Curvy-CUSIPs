@@ -334,6 +334,7 @@ def historical_auction_cols():
         "comp_accepted",
         "comp_tendered",
         "corpus_cusip",
+        "tint_cusip_1",
         "currently_outstanding",
         "direct_bidder_accepted",
         "direct_bidder_tendered",

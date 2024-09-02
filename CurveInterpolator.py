@@ -25,32 +25,12 @@ import scipy.interpolate
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from models.MonotoneConvex import MonotoneConvex
 
+
 # TODO
 # explore numba
-class CurveInterpolator:
-    # all have to exist in curve_set
-    _required_cols = [
-        "cusip",
-        "security_type",
-        "auction_date",
-        "issue_date",
-        "maturity_date",
-        "time_to_maturity",
-        "is_on_the_run",
-        "label",
-        "original_security_term",
-    ]
-    # one has to exist in curve_set
-    _required_ytm_cols = [
-        "offer_yield",
-        "bid_yield",
-        "eod_yield",
-        "mid_yield",
-    ]
-    _curve_set_df: pd.DataFrame = pd.DataFrame(columns=_required_cols + ["eod_yield"])
-    _yield_to_use: Literal["offer_yield", "bid_yield", "mid_yield", "eod_yield"] = (
-        "eod_yield"
-    )
+class GeneralCurveInterpolator:
+    _x: npt.ArrayLike = None
+    _y: npt.ArrayLike = None
     _linspace_x_num: int = 100
     _linspace_x: npt.NDArray[np.float64] = np.zeros(
         shape=_linspace_x_num, dtype=np.float64
@@ -58,13 +38,6 @@ class CurveInterpolator:
 
     _enable_extrapolate_left_fill: bool = False
     _enable_extrapolate_right_fill: bool = False
-
-    _x: npt.NDArray[np.float64] = np.zeros(
-        shape=len(_curve_set_df.index), dtype=np.float64
-    )  # ttm
-    _y: npt.NDArray[np.float64] = np.zeros(
-        shape=len(_curve_set_df.index), dtype=np.float64
-    )  # ytm
 
     _cubic_spline_interp_bc_type: Literal[
         "not-a-knot", "periodic", "clamped", "natural"
@@ -81,64 +54,27 @@ class CurveInterpolator:
 
     def __init__(
         self,
-        curve_set_df: pd.DataFrame,
-        use_bid_side: Optional[bool] = False,
-        use_offer_side: Optional[bool] = False,
-        use_mid_side: Optional[bool] = False,
+        x: npt.ArrayLike,
+        y: npt.ArrayLike,
+        linspace_x_lower_bound: Optional[float | int] = None,
+        linspace_x_upper_bound: Optional[float | int] = None,
         linspace_x_num: int = 100,
         enable_extrapolate_left_fill: Optional[bool] = False,
         enable_extrapolate_right_fill: Optional[bool] = False,
-        drop_nans: Optional[bool] = True,
         debug_verbose: Optional[bool] = False,
         info_verbose: Optional[bool] = False,
         no_logs_plz: Optional[bool] = False,
     ):
-        is_subset = set(self._required_cols).issubset(curve_set_df.columns)
-        self._logger.debug(f"CurveInterpolator Init - is valid curve set: {is_subset}")
-        if not is_subset:
-            raise ValueError(
-                f"Required Cols Missing: {set(self._required_cols) - set(curve_set_df.columns)}"
-            )
-        self._curve_set_df = curve_set_df
-
-        if use_bid_side:
-            self._yield_to_use = "bid_yield"
-        elif use_offer_side:
-            self._yield_to_use = "offer_yield"
-        elif use_mid_side:
-            self._yield_to_use = "mid_yield"
-
-        logging.debug(
-            "NaN CUSIPs",
-            self._curve_set_df[
-                (self._curve_set_df["time_to_maturity"].isna())
-                | (self._curve_set_df[self._yield_to_use].isna())
-            ][["cusip", "label", "original_security_term"]],
-        )
-        if drop_nans:
-            self._curve_set_df = self._curve_set_df[
-                (self._curve_set_df["time_to_maturity"].notna())
-                & (self._curve_set_df[self._yield_to_use].notna())
-            ]
-
+        self._x = x
+        self._y = y
         self._linspace_x_num = linspace_x_num
+        self._linspace_x = np.linspace(
+            linspace_x_lower_bound or min(x),
+            linspace_x_upper_bound or max(x),
+            num=self._linspace_x_num,
+        )
         self._enable_extrapolate_left_fill = enable_extrapolate_left_fill
         self._enable_extrapolate_right_fill = enable_extrapolate_right_fill
-
-        min_ttm = (
-            0
-            if self._enable_extrapolate_left_fill
-            else self._curve_set_df["time_to_maturity"].min()
-        )
-        max_ttm = (
-            30
-            if self._enable_extrapolate_right_fill
-            else self._curve_set_df["time_to_maturity"].max()
-        )
-        self._linspace_x = np.linspace(min_ttm, max_ttm, num=self._linspace_x_num)
-
-        self._x = self._curve_set_df["time_to_maturity"].to_numpy()
-        self._y = self._curve_set_df[self._yield_to_use].to_numpy()
 
         self._debug_verbose = debug_verbose
         self._info_verbose = info_verbose
@@ -151,7 +87,9 @@ class CurveInterpolator:
             self._logger.disabled = True
             self._logger.propagate = False
 
-    def _linear_interpolation(self) -> np.ndarray:
+    def linear_interpolation(
+        self, return_func=False
+    ) -> np.ndarray | scipy.interpolate.interp1d:
         func_no_extrap = scipy.interpolate.interp1d(
             self._x, self._y, kind="linear", bounds_error=False
         )
@@ -163,6 +101,9 @@ class CurveInterpolator:
             bounds_error=False,
             fill_value="extrapolate",
         )
+        if return_func:
+            return func_extrap
+
         ynew_no_extrap = func_no_extrap(self._linspace_x)
         ynew_extrap = func_extrap(self._linspace_x)
         ynew = ynew_no_extrap.copy()
@@ -176,22 +117,10 @@ class CurveInterpolator:
             ]
 
         return ynew
-    
-    def linear_interpolator(self, input_x) -> Callable:
-        func_no_extrap = scipy.interpolate.interp1d(
-            self._x, self._y, kind="linear", bounds_error=False
-        )
-        func_extrap = scipy.interpolate.interp1d(
-            self._x,
-            self._y,
-            axis=0,
-            kind="linear",
-            bounds_error=False,
-            fill_value="extrapolate",
-        )
-        
 
-    def _log_linear_interpolation(self) -> np.ndarray:
+    def log_linear_interpolation(
+        self, return_func=False
+    ) -> np.ndarray | scipy.interpolate.interp1d:
         log_x = np.log(self._x)
         log_linspace_x = np.log(self._linspace_x)
 
@@ -206,6 +135,8 @@ class CurveInterpolator:
             bounds_error=False,
             fill_value="extrapolate",
         )
+        if return_func:
+            return func_extrap
 
         ynew_no_extrap = func_no_extrap(log_linspace_x)
         ynew_extrap = func_extrap(log_linspace_x)
@@ -236,22 +167,40 @@ class CurveInterpolator:
     def set_cubic_spline_interpolation_nu(self, nu: int):
         self._cubic_spline_interp_nu = nu
 
-    def _cubic_spline_interpolation(self) -> np.ndarray:
+    def cubic_spline_interpolation(
+        self,
+        bc_type: Optional[
+            Literal["not-a-knot", "periodic", "clamped", "natural"]
+        ] = None,
+        custom_knots: Optional[npt.NDArray[np.float64]] = None,
+        nu: Optional[int] = None,
+        return_func=False,
+    ) -> np.ndarray | scipy.interpolate.CubicSpline:
+        if bc_type:
+            self._cubic_spline_interp_bc_type = bc_type
+        if custom_knots:
+            self._cubic_spline_interp_custom_knots = custom_knots
+        if nu:
+            self._cubic_spline_interp_nu = nu
         all_x = np.sort(
             np.concatenate([self._x, self._cubic_spline_interp_custom_knots])
         )
         all_y = np.interp(all_x, self._x, self._y)
         spline = scipy.interpolate.CubicSpline(
-            all_x, all_y, bc_type=self._cubic_spline_interp_bc_type
+            all_x,
+            all_y,
+            bc_type=self._cubic_spline_interp_bc_type,
+            extrapolate=True,
         )
+        if return_func:
+            return spline
+        
         ynew = spline(self._linspace_x, nu=self._cubic_spline_interp_nu)
-
         if self._enable_extrapolate_left_fill:
             left_indices = self._linspace_x < min(self._x)
             ynew[left_indices] = self._y[0] + (
                 self._linspace_x[left_indices] - self._x[0]
             ) * (self._y[1] - self._y[0]) / (self._x[1] - self._x[0])
-
         if self._enable_extrapolate_right_fill:
             right_indices = self._linspace_x > max(self._x)
             ynew[right_indices] = self._y[-1] + (
@@ -279,16 +228,15 @@ class CurveInterpolator:
 
         return dydx
 
-    # what the Office of Debt Management at Department of the Treasury uses for par curve build
-    # https://home.treasury.gov/quasi-cubic-hermite-spline-treasury-yield-curve-methodology
-    def _cubic_hermite_interpolation(self) -> np.ndarray:
+    def cubic_hermite_interpolation(self, return_func=False) -> np.ndarray:
         self._dydx = self._calculate_derivatives()
         func_no_extrap = scipy.interpolate.CubicHermiteSpline(
-            self._x, self._y, self._dydx
+            self._x, self._y, self._dydx 
         )
-
+        if return_func:
+            return func_no_extrap
+        
         ynew_no_extrap = func_no_extrap(self._linspace_x)
-
         ynew = ynew_no_extrap.copy()
         if self._enable_extrapolate_left_fill:
             left_extrap_values = (
@@ -297,7 +245,6 @@ class CurveInterpolator:
                 + self._y[0]
             )
             ynew[self._linspace_x < self._x[0]] = left_extrap_values
-
         if self._enable_extrapolate_right_fill:
             right_extrap_values = (
                 self._dydx[-1]
@@ -309,17 +256,18 @@ class CurveInterpolator:
         return ynew
 
     # monotonic cubic interpolation
-    def _pchip_interpolation(self) -> np.ndarray:
+    def pchip_interpolation(self, return_func=False) -> np.ndarray:
         func_no_extrap = scipy.interpolate.PchipInterpolator(
             self._x, self._y, extrapolate=False
         )
         func_extrap = scipy.interpolate.PchipInterpolator(
             self._x, self._y, extrapolate=True
         )
-
+        if return_func:
+            return func_no_extrap
+        
         ynew_no_extrap = func_no_extrap(self._linspace_x)
         ynew_extrap = func_extrap(self._linspace_x)
-
         ynew = ynew_no_extrap.copy()
         if self._enable_extrapolate_left_fill:
             ynew[self._linspace_x < self._x[0]] = ynew_extrap[
@@ -332,8 +280,11 @@ class CurveInterpolator:
 
         return ynew
 
-    def _akima_interpolation(self) -> np.ndarray:
+    def akima_interpolation(self, return_func=False) -> np.ndarray:
         akima = scipy.interpolate.Akima1DInterpolator(self._x, self._y)
+        if return_func:
+            return akima
+        
         ynew = akima(self._linspace_x)
         if self._enable_extrapolate_left_fill:
             left_indices = self._linspace_x < min(self._x)
@@ -352,12 +303,18 @@ class CurveInterpolator:
     def set_b_spline_k(self, b: int):
         self._bspline_k = b
 
-    def _b_spline_interpolation(self) -> np.ndarray:
+    def b_spline1_interpolation(
+        self, k: Optional[int] = None, return_func=False
+    ) -> np.ndarray:
+        if k:
+            self._bspline_k = k
         spline = scipy.interpolate.make_interp_spline(
             self._x, self._y, k=self._bspline_k
         )
+        if return_func:
+            return spline
+        
         ynew = spline(self._linspace_x)
-
         if self._enable_extrapolate_left_fill:
             left_indices = self._linspace_x < self._x[0]
             slope_left = (self._y[1] - self._y[0]) / (self._x[1] - self._x[0])
@@ -374,17 +331,64 @@ class CurveInterpolator:
 
         return ynew
 
-    def _ppoly_interpolation(self) -> np.ndarray:
+    def b_spline_with_knots_interpolation(
+        self, knots: Optional[npt.ArrayLike], k: Optional[int] = 3, return_func=False
+    ) -> np.ndarray:
+        tck = scipy.interpolate.splrep(self._x, self._y, t=knots, k=3)
+        # bspline = splev(ttm_interp, tck)
+        bspline = scipy.interpolate.BSpline(*tck)
+        if return_func:
+            return bspline
+
+        ynew_no_extrap = bspline(self._linspace_x)
+        ynew_extrap = bspline(self._linspace_x)
+        ynew = ynew_no_extrap.copy()
+        if self._enable_extrapolate_left_fill:
+            ynew[self._linspace_x < self._x[0]] = ynew_extrap[
+                self._linspace_x < self._x[0]
+            ]
+        if self._enable_extrapolate_right_fill:
+            ynew[self._linspace_x > self._x[-1]] = ynew_extrap[
+                self._linspace_x > self._x[-1]
+            ]
+
+        return ynew
+
+    def univariate_spline(self, s: float, return_func=False):
+        unispline = scipy.interpolate.UnivariateSpline(
+            x=self._x,
+            y=self._y,
+            s=s
+        )
+        if return_func:
+            return unispline
+        
+        ynew_no_extrap = unispline(self._linspace_x)
+        ynew_extrap = unispline(self._linspace_x)
+        ynew = ynew_no_extrap.copy()
+        if self._enable_extrapolate_left_fill:
+            ynew[self._linspace_x < self._x[0]] = ynew_extrap[
+                self._linspace_x < self._x[0]
+            ]
+        if self._enable_extrapolate_right_fill:
+            ynew[self._linspace_x > self._x[-1]] = ynew_extrap[
+                self._linspace_x > self._x[-1]
+            ]
+
+        return ynew
+
+    
+    def ppoly_interpolation(self, return_func=False) -> np.ndarray:
         coeffs = scipy.interpolate.CubicSpline(self._x, self._y).c
         ppoly = scipy.interpolate.PPoly(coeffs, self._x)
+        if return_func:
+            return ppoly
 
         ynew_no_extrap = ppoly(self._linspace_x)
         ynew = ynew_no_extrap.copy()
-
         if self._enable_extrapolate_left_fill:
             left_extrap_values = ppoly(self._linspace_x[self._linspace_x < self._x[0]])
             ynew[self._linspace_x < self._x[0]] = left_extrap_values
-
         if self._enable_extrapolate_right_fill:
             right_extrap_values = ppoly(
                 self._linspace_x[self._linspace_x > self._x[-1]]
@@ -392,7 +396,7 @@ class CurveInterpolator:
             ynew[self._linspace_x > self._x[-1]] = right_extrap_values
 
         return ynew
-    
+
     def _monotone_convex(self) -> np.ndarray:
         mc_spline = MonotoneConvex(terms=self._x, spots=self._y)
         return [mc_spline.spot(t) for t in self._linspace_x]

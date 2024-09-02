@@ -7,7 +7,7 @@ import warnings
 from collections import defaultdict
 from datetime import datetime
 from functools import partial, reduce
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Literal
 import os
 import aiohttp
 import httpx
@@ -934,8 +934,8 @@ class CurveDataFetcher:
                 "parValue",
                 "percentOutstanding",
                 "est_outstanding_amt",
-                "changeFromPriorWeek",
-                "changeFromPriorYear",
+                # "changeFromPriorWeek",
+                # "changeFromPriorYear",
             ]
             try:
                 date_str = valid_soma_dates_from_input[date].strftime("%Y-%m-%d")
@@ -1559,6 +1559,7 @@ class CurveDataFetcher:
         # auctions_df: Optional[pd.DataFrame] = None,
         sorted: Optional[bool] = False,
         use_github: Optional[bool] = False,
+        use_public_dotcom: Optional[bool] = False,
         include_off_the_run_number: Optional[bool] = False,
         market_cols_to_return: List[str] = None,
         calc_free_float: Optional[bool] = False,
@@ -1570,7 +1571,7 @@ class CurveDataFetcher:
             )
             return
 
-        if use_github:
+        if use_github or use_public_dotcom:
             calc_ytms = False
 
         if market_cols_to_return:
@@ -1587,15 +1588,8 @@ class CurveDataFetcher:
                 # include_outstanding_amt = True
 
         async def gather_tasks(client: httpx.AsyncClient, as_of_date: datetime):
-            ust_historical_prices_tasks = (
-                (
-                    await self._build_fetch_tasks_historical_cusip_prices(
-                        client=client, dates=[as_of_date], uid="ust_prices"
-                    )
-                )
-                if not use_github
-                else (
-                    await self._build_fetch_tasks_historical_cusip_prices_github(
+            if use_github:
+                ust_historical_prices_tasks= await self._build_fetch_tasks_historical_cusip_prices_github(
                         client=client,
                         dates=[as_of_date],
                         uid="ust_prices",
@@ -1615,8 +1609,11 @@ class CurveDataFetcher:
                             else market_cols_to_return
                         ),
                     )
-                )
-            )
+            else:
+                ust_historical_prices_tasks = await self._build_fetch_tasks_historical_cusip_prices(
+                        client=client, dates=[as_of_date], uid="ust_prices"
+                    )
+            
             tasks = ust_historical_prices_tasks
 
             if include_soma_holdings:
@@ -1697,6 +1694,7 @@ class CurveDataFetcher:
                     "label",
                     "security_term",
                     "original_security_term",
+                    "corpus_cusip",
                 ]
             ]
         merged_df = reduce(
@@ -1831,7 +1829,7 @@ class CurveDataFetcher:
             self._logger.error(f"Public.com JWT Request Failed: {e}")
             return None
 
-    async def _fetch_cusip_public_dotcom(
+    async def _fetch_cusip_timeseries_public_dotcom(
         self,
         client: httpx.AsyncClient,
         cusip: str,
@@ -1842,9 +1840,12 @@ class CurveDataFetcher:
         backoff_factor: Optional[int] = 1,
         uid: Optional[str | int] = None,
     ):
-        cols_to_return = ["Date", "Price", "YTW"]
+        cols_to_return = ["Date", "Price", "YTM"] # YTW is same as YTM for cash USTs
         retries = 0
         try:
+            if pd.isna(cusip) or not cusip:
+                raise ValueError(f"Public.com - invalid CUSIP passed") 
+            
             while retries < max_retries:
                 try:
                     span = "MAX"
@@ -1877,23 +1878,23 @@ class CurveDataFetcher:
                     response = await client.get(data_url, headers=data_headers)
                     response.raise_for_status()
                     df = pd.DataFrame(response.json()["data"])
-                    df["timestamp"] = pd.to_datetime(df["timestamp"]).dt.date
+                    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
                     df["unitPrice"] = pd.to_numeric(df["unitPrice"]) * 100
                     df["yieldToWorst"] = pd.to_numeric(df["yieldToWorst"]) * 100
                     df.columns = cols_to_return
-                    if start_date and end_date:
-                        df = df[df["Date"] >= start_date]
+                    if start_date:
+                        df = df[df["Date"].dt.date >= start_date.date()]
                     if end_date:
-                        df = df[df["Date"] <= end_date]
+                        df = df[df["Date"].dt.date <= end_date.date()]
                     if uid:
                         return cusip, df, uid
                     return cusip, df
 
                 except httpx.HTTPStatusError as e:
                     self._logger.error(
-                        f"Public.com - Bad Status: {response.status_code}"
+                        f"Public.com - Bad Status for {cusip}: {response.status_code}"
                     )
-                    if response.status_code == 404:
+                    if response.status_code == 404 or response.status_code == 400: # public.com endpoint doesnt throw a 404 specifically
                         if uid:
                             return cusip, pd.DataFrame(columns=cols_to_return), uid
                         return cusip, pd.DataFrame(columns=cols_to_return)
@@ -1922,12 +1923,19 @@ class CurveDataFetcher:
                 return cusip, pd.DataFrame(columns=cols_to_return), uid
             return cusip, pd.DataFrame(columns=cols_to_return)
 
-    def public_dotcom_api(
+    async def _fetch_cusip_timeseries_public_dotcome_with_semaphore(
+        self, semaphore, *args, **kwargs
+    ):
+        async with semaphore:
+            return await self._fetch_cusip_timeseries_public_dotcom(*args, **kwargs)
+
+    def public_dotcom_timeseries_api(
         self,
         cusips: List[str],
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
         refresh_jwt: Optional[bool] = False,
+        max_concurrent_tasks: int = 64,
     ):
         if refresh_jwt or not self._public_dotcom_jwt:
             self._public_dotcom_jwt = self._fetch_public_dotcome_jwt()
@@ -1941,13 +1949,16 @@ class CurveDataFetcher:
             end_date: datetime,
             jwt_str: str,
         ):
+            semaphore = asyncio.Semaphore(max_concurrent_tasks)
             tasks = [
-                self._fetch_cusip_public_dotcom(
+                self._fetch_cusip_timeseries_public_dotcome_with_semaphore(
+                    semaphore=semaphore,
                     client=client,
                     cusip=cusip,
                     start_date=start_date,
                     end_date=end_date,
                     jwt_str=jwt_str,
+                    max_retries=1,
                 )
                 for cusip in cusips
             ]
@@ -1976,7 +1987,7 @@ class CurveDataFetcher:
         )
         return dict(dfs)
 
-    async def _fetch_cusip_bondsupermart(
+    async def _fetch_cusip_timeseries_bondsupermart(
         self,
         client: httpx.AsyncClient,
         cusip: str,
@@ -2087,9 +2098,13 @@ class CurveDataFetcher:
                     ) / 2
 
                     if start_date:
-                        merged_df = merged_df[merged_df["Date"] >= start_date]
+                        merged_df = merged_df[
+                            merged_df["Date"].dt.date >= start_date.date()
+                        ]
                     if end_date:
-                        merged_df = merged_df[merged_df["Date"] <= start_date]
+                        merged_df = merged_df[
+                            merged_df["Date"].dt.date <= end_date.date()
+                        ]
 
                     if uid:
                         return cusip, merged_df, uid
@@ -2128,13 +2143,13 @@ class CurveDataFetcher:
                 return cusip, pd.DataFrame(columns=cols_to_return), uid
             return cusip, pd.DataFrame(columns=cols_to_return)
 
-    async def _fetch_cusip_bondsupermart_with_semaphore(
+    async def _fetch_cusip_timeseries_bondsupermart_with_semaphore(
         self, semaphore, *args, **kwargs
     ):
         async with semaphore:
-            return await self._fetch_cusip_bondsupermart(*args, **kwargs)
+            return await self._fetch_cusip_timeseries_bondsupermart(*args, **kwargs)
 
-    def bondsupermart_api(
+    def bondsupermart_timeseries_api(
         self,
         cusips: List[str],
         start_date: Optional[datetime] = None,
@@ -2149,7 +2164,7 @@ class CurveDataFetcher:
         ):
             semaphore = asyncio.Semaphore(max_concurrent_tasks)
             tasks = [
-                self._fetch_cusip_bondsupermart_with_semaphore(
+                self._fetch_cusip_timeseries_bondsupermart_with_semaphore(
                     semaphore=semaphore,
                     client=client,
                     cusip=cusip,
@@ -2182,3 +2197,20 @@ class CurveDataFetcher:
             )
         )
         return dict(dfs)
+    
+    # async def _fetch_cusip_timeseries_tradingview(
+    #     self,
+    #     client: httpx.AsyncClient,
+    #     cusip: str,
+    #     start_date: Optional[datetime] = None,
+    #     end_date: Optional[datetime] = None,
+    #     max_retries: Optional[int] = 3,
+    #     backoff_factor: Optional[int] = 1,
+    #     uid: Optional[str | int] = None,
+    #     exchange: Literal["FWB", "BER", "DUS", "MUN", "EUROTLX"] = "FWB",
+    # ):
+    #     if exchange == "EUROTLX":
+    #         cusip = get_isin_from_cusip(cusip_str=cusip)
+        
+        
+        
