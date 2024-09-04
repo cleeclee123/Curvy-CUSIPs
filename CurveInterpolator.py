@@ -334,7 +334,7 @@ class GeneralCurveInterpolator:
     def b_spline_with_knots_interpolation(
         self, knots: Optional[npt.ArrayLike], k: Optional[int] = 3, return_func=False
     ) -> np.ndarray:
-        tck = scipy.interpolate.splrep(self._x, self._y, t=knots, k=3)
+        tck = scipy.interpolate.splrep(self._x, self._y, t=knots, k=k)
         # bspline = splev(ttm_interp, tck)
         bspline = scipy.interpolate.BSpline(*tck)
         if return_func:

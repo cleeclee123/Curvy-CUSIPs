@@ -1561,6 +1561,7 @@ class CurveDataFetcher:
         use_github: Optional[bool] = False,
         use_public_dotcom: Optional[bool] = False,
         include_off_the_run_number: Optional[bool] = False,
+        include_corpus_cusip: Optional[bool] = False,
         market_cols_to_return: List[str] = None,
         calc_free_float: Optional[bool] = False,
         calc_mod_duration: Optional[bool] = False,
@@ -1672,7 +1673,18 @@ class CurveDataFetcher:
             uid = tup[-1]
             if uid == "ust_auctions":
                 auctions_dfs.append(tup[0])
-            elif uid == "ust_prices_public_dotcom" and use_public_dotcom:
+                continue
+
+            if (
+                uid == "ust_prices"
+                or uid == "soma_holdings"
+                or uid == "ust_stripping"
+                or uid == "ust_outstanding_amt"
+            ):
+                dfs.append(tup[1])
+                continue
+
+            if uid == "ust_prices_public_dotcom" and use_public_dotcom:
                 if not isinstance(tup[1], pd.DataFrame):
                     continue
                 if not tup[1].empty:
@@ -1680,18 +1692,13 @@ class CurveDataFetcher:
                         {
                             "cusip": tup[0],
                             f"{quote_type}_price": tup[1].iloc[-1]["Price"],
-                            f"{quote_type}_ytm": tup[1].iloc[-1]["YTM"],
+                            f"{quote_type}_yield": tup[1].iloc[-1]["YTM"],
                         }
                     )
-            elif (
-                uid == "ust_prices"
-                or uid == "soma_holdings"
-                or uid == "ust_stripping"
-                or uid == "ust_outstanding_amt"
-            ):
-                dfs.append(tup[1])
-            else:
-                self._logger.warning(f"CURVE SET - unknown UID, Current Tuple: {tup}")
+                    continue
+
+            # ideally should neever get here
+            self._logger.warning(f"CURVE SET - unknown UID, Current Tuple: {tup}")
 
         auctions_df = get_active_cusips(
             historical_auctions_df=self._historical_auctions_df,
@@ -1714,33 +1721,46 @@ class CurveDataFetcher:
         ).dt.days / 365
 
         if not include_auction_results or filtered_free_float_df_col:
-            auctions_df = auctions_df[
-                [
-                    "cusip",
-                    "security_type",
-                    "auction_date",
-                    "issue_date",
-                    "maturity_date",
-                    "time_to_maturity",
-                    "int_rate",
-                    "high_investment_rate",
-                    "is_on_the_run",
-                    "label",
-                    "security_term",
-                    "original_security_term",
-                    "corpus_cusip",
-                ]
+            default_auction_cols = [
+                "cusip",
+                "security_type",
+                "auction_date",
+                "issue_date",
+                "maturity_date",
+                "time_to_maturity",
+                "int_rate",
+                "high_investment_rate",
+                "is_on_the_run",
+                "label",
+                "security_term",
+                "original_security_term",
             ]
+            if include_corpus_cusip:
+                default_auction_cols.append("corpus_cusip")
+            auctions_df = auctions_df[default_auction_cols]
+
+        merged_df = reduce(
+            lambda left, right: pd.merge(left, right, on="cusip", how="outer"), dfs
+        )
         if not use_public_dotcom:
-            merged_df = reduce(
-                lambda left, right: pd.merge(left, right, on="cusip", how="outer"), dfs
+            merged_df = pd.merge(
+                left=auctions_df, right=merged_df, on="cusip", how="outer"
             )
-            merged_df = pd.merge(left=auctions_df, right=merged_df, on="cusip", how="outer")
         else:
-            merged_df = pd.merge(left=auctions_df, right=pd.DataFrame(public_dotcom_dicts), on="cusip", how="outer")
-        
+            market_df = pd.merge(
+                left=auctions_df,
+                right=pd.DataFrame(public_dotcom_dicts),
+                on="cusip",
+                how="outer",
+            )
+            merged_df = pd.merge(
+                left=market_df,
+                right=merged_df,
+                on="cusip",
+                how="outer",
+            ) 
         merged_df = merged_df[merged_df["cusip"].apply(is_valid_ust_cusip)]
-            
+
         if calc_free_float:
             merged_df["parValue"] = pd.to_numeric(
                 merged_df["parValue"], errors="coerce"
@@ -2282,3 +2302,29 @@ class CurveDataFetcher:
     # ):
     #     if exchange == "EUROTLX":
     #         cusip = get_isin_from_cusip(cusip_str=cusip)
+
+    async def _fetch_cusip_timeseries_yahoofinance():
+        pass
+        # https://query1.finance.yahoo.com/v8/finance/chart/US912810SX72.SG?period1=1724764200&period2=1725454800&interval=5m&includePrePost=true&events=div%7Csplit%7Cearn&useYfid=true&lang=en-US&region=US
+        # {
+        #     ":authority": "query1.finance.yahoo.com",
+        #     ":method": "GET",
+        #     ":path": "/v8/finance/chart/US912810SX72.SG?period1=1724764200&period2=1725454800&interval=5m&includePrePost=true&events=div%7Csplit%7Cearn&useYfid=true&lang=en-US&region=US",
+        #     ":scheme": "https",
+        #     "accept": "*/*",
+        #     "accept-encoding": "gzip, deflate, br, zstd",
+        #     "accept-language": "en-US,en;q=0.9",
+        #     "cache-control": "no-cache",
+        #     "dnt": "1",
+        #     "origin": "https://finance.yahoo.com",
+        #     "pragma": "no-cache",
+        #     "priority": "u=1, i",
+        #     "referer": "https://finance.yahoo.com/chart/US912810SX72.SG",
+        #     "sec-ch-ua": '"Chromium";v="128", "Not;A=Brand";v="24", "Google Chrome";v="128"',
+        #     "sec-ch-ua-mobile": "?0",
+        #     "sec-ch-ua-platform": '"Windows"',
+        #     "sec-fetch-dest": "empty",
+        #     "sec-fetch-mode": "cors",
+        #     "sec-fetch-site": "same-site",
+        #     "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+        # }

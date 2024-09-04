@@ -580,21 +580,18 @@ def get_spot_rates_fitter(
             continue
         if fit_method == "ql_f_cbs" and not knots:
             continue
-        
+
         ql_fit_method = ql_fitting_methods_dict[fit_method]
-        
+
         if fit_method == "ql_f_sp":
-            called_ql_fit_method = ql_fit_method(simple_poly) 
+            called_ql_fit_method = ql_fit_method(simple_poly)
         elif fit_method == "ql_f_cbs":
-            called_ql_fit_method = ql_fit_method(knots) 
+            called_ql_fit_method = ql_fit_method(knots)
         else:
             called_ql_fit_method = ql_fit_method()
-        
+
         curr_curve = ql.FittedBondDiscountCurve(
-            bond_settlement_date,
-            bond_helpers,
-            day_count,
-            called_ql_fit_method
+            bond_settlement_date, bond_helpers, day_count, called_ql_fit_method
         )
         curr_curve.enableExtrapolation()
         if fit_method not in ql_curves:
@@ -973,3 +970,83 @@ def reprice_bonds(
             print(row["cusip"], e)
 
     return pd.DataFrame(bonds)
+
+
+# def reprice_bonds_single_scipy_interpolated_curve(
+#     as_of_date: datetime,
+#     scipy_interp_curve: scipy.interpolate.interp1d,
+#     curve_set_df: pd.DataFrame,
+#     yield_col: str,
+#     price_col: str,
+#     coupon_col: str,
+#     mat_col: str,
+# ) -> pd.DataFrame:
+#     # price_cols = ["bid_price", "offer_price", "mid_price", "eod_price"]
+#     # required_cols = ["issue_date", "maturity_date", "int_rate"]
+#     # price_col_exists = any(item in curve_set_df.columns for item in price_cols)
+#     # missing_required_cols = [
+#     #     item for item in required_cols if item not in curve_set_df.columns
+#     # ]
+
+#     # if not price_col_exists:
+#     #     raise ValueError(
+#     #         f"Build Spot Curve - Couldn't find a valid price col in your curve set df - one of {price_cols}"
+#     #     )
+#     # if missing_required_cols:
+#     #     raise ValueError(
+#     #         f"Build Spot Curve - Missing required curve set cols: {missing_required_cols}"
+#     #     )
+
+#     # price_col = next(
+#     #     (item for item in price_cols if item in curve_set_df.columns), None
+#     # )
+#     # quote_type = price_col.split("_")[0]
+#     # yield_col = f"{quote_type}_yield"
+
+#     # if yield_col not in curve_set_df.columns:
+#     #     raise ValueError(
+#     #         f"Build Spot Curve - Missing required curve set cols: {yield_col}"
+#     #     )
+
+#     as_of_date = np.datetime64(as_of_date)
+#     t_plus = 1
+#     bond_settlement_date = as_of_date + BDay(t_plus) 
+#     frequency = 2
+#     par = 100.0
+
+#     bonds: List[Dict[str, float]] = []
+#     for _, row in curve_set_df.iterrows():
+#         try:
+#             maturity_date = np.datetime64(row[mat_col])
+#             time_to_maturity = (maturity_date - bond_settlement_date).days / 365 
+#             discount_factor = np.exp(
+#                 -scipy_interp_curve(time_to_maturity) * time_to_maturity
+#             )
+
+#             if np.isnan(row[coupon_col]):
+#                 curr_calced_npv = par * discount_factor
+#             else:
+#                 num_periods = int(frequency * time_to_maturity)
+#                 cash_flows = [
+#                     (par * (row[coupon_col] / 100) / frequency) * discount_factor**i
+#                     for i in range(1, num_periods + 1)
+#                 ]
+#                 cash_flows.append(par * discount_factor)
+#                 curr_calced_npv = sum(cash_flows)
+
+#             curr_calced_ytm = -np.log(curr_calced_npv / par) / time_to_maturity * 100
+#             bonds.append(
+#                 {
+#                     "label": row["label"],
+#                     yield_col: row[yield_col],
+#                     price_col: row[price_col],
+#                     "repriced_npv": curr_calced_npv,
+#                     "repriced_ytm": curr_calced_ytm,
+#                     "price_spread": row[price_col] - curr_calced_npv,
+#                     "ytm_spread": (row[yield_col] - curr_calced_ytm) * 100,
+#                 }
+#             )
+#         except Exception as e:
+#             print(row["label"], e)
+
+#     return pd.DataFrame(bonds)
