@@ -1,7 +1,7 @@
 import asyncio
 import warnings
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Literal
 import httpx
 import pandas as pd
 from functools import reduce
@@ -36,23 +36,20 @@ class YahooFinanceDataFetcher(DataFetcherBase):
             error_verbose=error_verbose,
         )
 
-    async def _fetch_cusip_timeseries_bondsupermart(
+    async def _fetch_cusip_timeseries_yahoofinance(
         self,
         client: httpx.AsyncClient,
         cusip: str,
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
+        interval: Optional[Literal["1m", "5m", "1h", "1d"]] = "1h",
+        exchange: Optional[Literal["SG", "DU", "MU", "TI"]] = "SG",
         max_retries: Optional[int] = 3,
         backoff_factor: Optional[int] = 1,
         uid: Optional[str | int] = None,
     ):
         pass
     
-
-# from datetime import datetime
-# import requests
-# import pandas as pd
-
 # start_date = datetime(2024, 5, 1)
 # end_date = datetime(2024, 5, 31)
 # period1 = int(start_date.timestamp())

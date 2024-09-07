@@ -94,13 +94,13 @@ def calculate_yields(row, as_of_date, use_quantlib=False):
 
 
 class CurveDataFetcher():
-    ust_data_fetcher = None
-    fedinvest_data_fetcher = None
-    nyfrb_data_fetcher = None
-    publicdotcom_data_fetcher = None
-    fred_data_fetcher = None
-    finra_data_fetcher = None
-    bondsupermart_fetcher = None
+    ust_data_fetcher: USTreasuryDataFetcher = None
+    fedinvest_data_fetcher: FedInvestDataFetcher = None
+    nyfrb_data_fetcher: NYFRBDataFetcher = None
+    publicdotcom_data_fetcher: PublicDotcomDataFetcher = None
+    fred_data_fetcher: FredDataFetcher = None
+    finra_data_fetcher: FinraDataFetcher = None
+    bondsupermart_fetcher: BondSupermartDataFetcher = None
 
     def __init__(
         self,
