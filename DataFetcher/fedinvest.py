@@ -376,6 +376,8 @@ class FedInvestDataFetcher(DataFetcherBase):
             df["Date"] = pd.to_datetime(df["Date"])
             df = df[(df["Date"] >= start_date) & (df["Date"] <= end_date)]
             df = df.reset_index(drop=True)
+            df.columns = ["Date", "CT2M", "CT3M", "CT6M", "CT1", "CT2", "CT3", "CT5", "CT7", "CT10", "CT20", "CT30"]
+            
             if tenors:
                 tenors = ["Date"] + tenors
                 return df[tenors]
@@ -415,6 +417,7 @@ class FedInvestDataFetcher(DataFetcherBase):
             df["Date"] = pd.to_datetime(df["Date"])
             df = df[(df["Date"] >= start_date) & (df["Date"] <= end_date)]
             df = df.reset_index(drop=True)
+            df.columns = ["Date", "CT2M", "CT3M", "CT6M", "CT1", "CT2", "CT3", "CT5", "CT7", "CT10", "CT20", "CT30"]
 
             if tenors:
                 tenors = ["Date"] + tenors
