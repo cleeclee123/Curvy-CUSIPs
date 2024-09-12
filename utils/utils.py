@@ -499,3 +499,16 @@ def get_isin_from_cusip(cusip_str, country_code: str = "US"):
 
     check_digit = (10 - digit_sum % 10) % 10
     return isin_to_digest + str(check_digit)
+
+
+def get_cstrips_cusips(
+    historical_auctions_df: pd.DataFrame,
+    as_of_date: Optional[datetime] = None,
+):
+    historical_auctions_df = auction_df_filterer(historical_auctions_df)
+    active_df = historical_auctions_df[historical_auctions_df["maturity_date"] > as_of_date]
+    tint_cusip = "tint_cusip_1" 
+    active_df[tint_cusip] = active_df[tint_cusip].replace("null", np.nan)
+    active_df = active_df[active_df[tint_cusip].notna()]
+    active_df = active_df.sort_values(by=["maturity_date"]).reset_index(drop=True)
+    return active_df[["maturity_date", tint_cusip]] 

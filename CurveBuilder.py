@@ -194,7 +194,32 @@ Using QuantLib's Piecewise yield term structure for bootstrapping market observe
 - flag to take the averages of all Piecewise methods or pass in a specifc method
 - passing in multiple ql_bootstrap_methods will take the average of the spot rates calculated from the different methods 
 """
-
+def ql_piecewise_method_pretty(bs_method):
+    ql_piecewise_methods_pretty_dict = {
+        "ql_plld": "Piecewise Log Linear Discount",
+        "ql_lcd": "Piecewise Log Cubic Discount",
+        "ql_lz": "Piecewise Linear Zero",
+        "ql_cz": "Piecewise Cubic Zero",
+        "ql_lf": "Piecewise Linear Forward",
+        "ql_spd": "Piecewise Spline Cubic Discount",
+        "ql_kz": "Piecewise Kruger Zero",
+        "ql_kld": "Piecewise Kruger Log Discount",
+        "ql_mcf": "Piecewise Convex Monotone Forward",
+        "ql_mcz": "Piecewise Convex Monotone Zero",
+        "ql_ncz": "Piecewise Natural Cubic Zero",
+        "ql_nlcd": "Piecewise Natural Log Cubic Discount",
+        "ql_lmlcd": "Piecewise Log Mixed Linear Cubic Discount",
+        "ql_pcz": "Piecewise Parabolic Cubic Zero",
+        "ql_mpcz": "Piecewise Monotonic Parabolic Cubic Zero",
+        "ql_lpcd": "Piecewise Log Parabolic Cubic Discount",
+        "ql_mlpcd": "Piecewise Monotonic Log Parabolic Cubic Discount",
+        "ql_f_ns": "Nelson-Siegel Fitting",
+        "ql_f_nss": "Svensson Fitting",
+        "ql_f_np": "Simple Polynomial Fitting",
+        "ql_f_es": "Exponential Splines Fitting",
+        "ql_f_cbs": "Cubic B-Splines Fitting",
+    }
+    return ql_piecewise_methods_pretty_dict[bs_method]
 
 def get_spot_rates_bootstrapper(
     curve_set_df: pd.DataFrame,
@@ -394,9 +419,7 @@ def get_spot_rates_bootstrapper(
     to_return_dict = {
         "ql_zero_curve_obj": None,
         "spot_rate_df": None,
-        # "rel_val_prices_df": None,
-        "scipy_interp_func": None,
-        "comparsion_df": None,
+        "scipy_interp_funcs": None,
     }
 
     if return_ql_zero_curve:
@@ -430,7 +453,7 @@ def get_spot_rates_bootstrapper(
                 # bounds_error=False,
                 # fill_value="extrapolate",
             )
-        to_return_dict["scipy_interp_func"] = scipy_interp_funcs
+        to_return_dict["scipy_interp_funcs"] = scipy_interp_funcs
 
     return to_return_dict
 

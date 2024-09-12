@@ -2,7 +2,7 @@ import logging
 from typing import Dict, Optional
 
 
-class DataFetcherBase():
+class DataFetcherBase:
     _global_timeout: int = 10
     _proxies: Dict[str, str] = {"http": None, "https": None}
     _httpx_proxies: Dict[str, str] = {"http://": None, "https://": None}
@@ -28,7 +28,7 @@ class DataFetcherBase():
         self._debug_verbose = debug_verbose
         self._error_verbose = error_verbose
         self._info_verbose = info_verbose
-        self._no_logs_plz = debug_verbose & error_verbose & info_verbose
+        self._no_logs_plz = not debug_verbose and not error_verbose and not info_verbose
 
         self._setup_logger()
 

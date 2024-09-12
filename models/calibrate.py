@@ -83,6 +83,51 @@ def calibrate_nss_ols(
     return curve, opt_res, lstsq_res
 
 
+def betas_nss_weighted_ols(
+    tau: Tuple[float, float], t: np.ndarray, y: np.ndarray, weights: np.ndarray
+) -> Tuple[NelsonSiegelSvenssonCurve, Any]:
+    """
+    Modified OLS fitting to include weights for the weighted Svensson model.
+    """
+    _assert_same_shape(t, y, weights)  # Ensure that all inputs have the same shape
+    curve = NelsonSiegelSvenssonCurve(0, 0, 0, 0, tau[0], tau[1])
+    factors = curve.factor_matrix(t)
+
+    # Apply the weights to the factors and yields
+    W = np.diag(weights)
+    weighted_factors = W @ factors
+    weighted_y = W @ y
+
+    # Solve the weighted OLS problem
+    lstsq_res = lstsq(weighted_factors, weighted_y, rcond=None)
+    beta = lstsq_res[0]
+    
+    return (
+        NelsonSiegelSvenssonCurve(beta[0], beta[1], beta[2], beta[3], tau[0], tau[1]),
+        lstsq_res,
+    )
+
+def weighted_errorfn_nss_ols(
+    tau: Tuple[float, float], t: np.ndarray, y: np.ndarray, weights: np.ndarray
+) -> float:
+    """
+    Error function for the weighted Svensson model to be used in optimization.
+    """
+    curve, lstsq_res = betas_nss_weighted_ols(tau, t, y, weights)
+    return np.sum(weights * (curve(t) - y) ** 2)
+
+def calibrate_nss_weighted_ols(
+    t: np.ndarray, y: np.ndarray, weights: np.ndarray, tau0: Tuple[float, float] = (2.0, 5.0)
+) -> Tuple[NelsonSiegelSvenssonCurve, Any]:
+    """
+    Calibration function for the weighted Svensson model using OLS.
+    """
+    _assert_same_shape(t, y, weights)
+    opt_res = minimize(weighted_errorfn_nss_ols, x0=np.array(tau0), args=(t, y, weights))
+    curve, lstsq_res = betas_nss_weighted_ols(opt_res.x, t, y, weights)
+    return curve, opt_res, lstsq_res
+
+
 def errorfn_bc_ols(tau: float, t: np.ndarray, y: np.ndarray) -> float:
     curve, _ = betas_bc_ols(tau, t, y)
     estimated_yields = curve(t)
@@ -220,10 +265,10 @@ def calibrate_smith_wilson_ols(
 
 
 def calibrate_pca_yield_curve(
-    historical_df: pd.DataFrame, n_components: int = 3, use_changes: bool = False
+    ytms: npt.NDArray[np.float64], historical_df: pd.DataFrame, n_components: int = 3, use_changes: bool = False
 ) -> Tuple[PCACurve, Any]:
     if use_changes:
         historical_df = historical_df.diff().dropna()
     pca_model = PCACurve(n_components=n_components)
-    pca_model.fit(historical_df)
+    pca_model.fit(ytms)
     return pca_model, pca_model.explained_variance

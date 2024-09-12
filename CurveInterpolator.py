@@ -397,9 +397,17 @@ class GeneralCurveInterpolator:
 
         return ynew
 
-    def _monotone_convex(self) -> np.ndarray:
+    def monotone_convex(self) -> np.ndarray:
         mc_spline = MonotoneConvex(terms=self._x, spots=self._y)
-        return [mc_spline.spot(t) for t in self._linspace_x]
+        def mc_spline_func(t):
+            return [mc_spline.spot(val) for val in t]
+        return mc_spline_func
+    
+    def smoothing_spline(self, w=None, lam=None):
+        return scipy.interpolate.make_smoothing_spline(self._x, self._y, w=w, lam=lam)
+    
+    def lsq_univariate_soline(self, knots: np.ndarray, k=3):
+        return scipy.interpolate.LSQUnivariateSpline(self._x, self._y, t=knots, k=k)
 
     def plotter(
         self,

@@ -16,8 +16,9 @@ from DataFetcher.finra import FinraDataFetcher
 from DataFetcher.fred import FredDataFetcher
 from DataFetcher.nyfrb import NYFRBDataFetcher
 from DataFetcher.public_dotcom import PublicDotcomDataFetcher
-
 from DataFetcher.ust import USTreasuryDataFetcher
+from DataFetcher.wsj import WSJDataFetcher
+
 from utils.QL_BondPricer import QL_BondPricer
 from utils.RL_BondPricer import RL_BondPricer
 from utils.utils import (
@@ -101,7 +102,8 @@ class CurveDataFetcher():
     fred_data_fetcher: FredDataFetcher = None
     finra_data_fetcher: FinraDataFetcher = None
     bondsupermart_fetcher: BondSupermartDataFetcher = None
-
+    wsj_data_fetcher: WSJDataFetcher = None
+    
     def __init__(
         self,
         use_ust_issue_date: Optional[bool] = False,
@@ -169,9 +171,17 @@ class CurveDataFetcher():
             info_verbose=info_verbose,
             error_verbose=error_verbose,
         )
+        
+        self.wsj_data_fetcher = WSJDataFetcher(
+            global_timeout=global_timeout,
+            proxies=proxies,
+            debug_verbose=debug_verbose,
+            info_verbose=info_verbose,
+            error_verbose=error_verbose,
+        )
     
-    # function to run async tasks
-    # def runner(self)
+    def async_runner(self, tasks):
+        pass
 
     def build_curve_set(
         self,
