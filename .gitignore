@@ -130,3 +130,4 @@ dist
 .pnp.*
 
 secret/
+temp.ipynb
