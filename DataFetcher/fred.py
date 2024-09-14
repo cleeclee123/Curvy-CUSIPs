@@ -7,7 +7,7 @@ from utils.fred import Fred
 
 
 class FredDataFetcher(DataFetcherBase):
-    _fred: Fred = None
+    fred: Fred = None
 
     def __init__(
         self,
@@ -26,7 +26,7 @@ class FredDataFetcher(DataFetcherBase):
             error_verbose=error_verbose,
         )
 
-        self._fred = Fred(api_key=fred_api_key, proxies=self._proxies)
+        self.fred = Fred(api_key=fred_api_key, proxies=self._proxies)
 
     def get_historical_cmt_yields(
         self,
@@ -35,7 +35,7 @@ class FredDataFetcher(DataFetcherBase):
         tenors: Optional[List[str]] = None,
     ):
         print("Fetching from FRED...")
-        df = self._fred.get_multiple_series(
+        df = self.fred.get_multiple_series(
             series_ids=[
                 "DTB3",
                 "DTB6",
