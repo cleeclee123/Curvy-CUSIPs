@@ -89,18 +89,20 @@ def identify_yield_curve_movements(
 
 def run_pca_yield_curve(
     df: pd.DataFrame,
-    n_components: Optional[int] = 3,
     date_subset_range: Annotated[List[datetime], 2] | None = None,
-    show_cum_ex_var: Optional[bool] = False,
+    n_components: Optional[int] = 3,
+    run_on_diff: Optional[bool] = False, # flag to use time step wise changes for PCA 
+    run_on_scaler: Optional[bool] = False, # flag to use corr matrix for PCA
+    show_cumul_ex_var: Optional[bool] = False,
+    show_eigenvectors: Optional[bool] = False,
+    show_hedge_ratios: Optional[bool] = False, 
+    show_pcs_timeseries: Optional[bool] = False,
+    show_recessions: Optional[bool] = False,
+    window: Optional[int] = None,
     show_most_recent: Optional[bool] = False,
     show_trend: Optional[bool] = False,
-    window: Optional[int] = None,
-    show_recessions: Optional[bool] = False,
-    curve_analysis_resampling_window: Optional[Literal["W", "M", "Y"]] = None,
-    run_on_diff: Optional[bool] = False, 
-    normalize_data: Optional[bool] = False,
-    show_pcs_timeseries: Optional[bool] = False,
     show_reconstructed: Optional[bool] = False,
+    curve_analysis_resampling_window: Optional[Literal["W", "M", "Y"]] = None,
     show_bull_steepening_periods: Optional[bool] = False,
     show_bear_steepening_periods: Optional[bool] = False,
     show_bull_flattening_periods: Optional[bool] = False,
@@ -114,13 +116,13 @@ def run_pca_yield_curve(
         df = df.diff()
         df = df.dropna()
         
-    if normalize_data:
+    if run_on_scaler:
         scaler = StandardScaler()
         data_scaled = scaler.fit_transform(df)
     else:
         data_scaled = df.values
         
-    if show_cum_ex_var:
+    if show_cumul_ex_var:
         pca = PCA()
         pca.fit(data_scaled)
         cumulative_explained_variance = np.cumsum(pca.explained_variance_ratio_)
@@ -139,19 +141,22 @@ def run_pca_yield_curve(
         plt.tight_layout()
         plt.show()
 
-    pca_3 = PCA(n_components=n_components)
-    data_pca_3 = pca_3.fit_transform(data_scaled)
+    pca_obj = PCA(n_components=n_components)
+    data_fitted_transf_pca = pca_obj.fit_transform(data_scaled)
     
     if show_reconstructed:
-        reconstructed_values = pca_3.inverse_transform(data_pca_3)
+        reconstructed_values = pca_obj.inverse_transform(data_fitted_transf_pca)
         reconstructed_df = pd.DataFrame(reconstructed_values, columns=df.columns, index=df.index)
         reconstruction_error = mean_squared_error(df, reconstructed_values)
         print("\nReconstruction Error (MSE):", reconstruction_error)
+        
+    if show_hedge_ratios:
+        pass 
 
     if show_pcs_timeseries:
-        pc1 = data_pca_3[:, 0]
-        pc2 = data_pca_3[:, 1]
-        pc3 = data_pca_3[:, 2]
+        pc1 = data_fitted_transf_pca[:, 0]
+        pc2 = data_fitted_transf_pca[:, 1]
+        pc3 = data_fitted_transf_pca[:, 2]
         
         if window:
             moving_avg_pc1 = pd.Series(pc1).rolling(window=window).mean()
