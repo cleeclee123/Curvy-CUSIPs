@@ -53,16 +53,16 @@ class FredDataFetcher(DataFetcherBase):
             observation_end=end_date,
         )
         df.columns = [
-            "13-Week",
-            "26-Week",
-            "52-Week",
-            "2-Year",
-            "3-Year",
-            "5-Year",
-            "7-Year",
-            "10-Year",
-            "20-Year",
-            "30-Year",
+            "CMT3M",
+            "CMT6M",
+            "CMT1",
+            "CMT2",
+            "CMT3",
+            "CMT5",
+            "CMT7",
+            "CMT10",
+            "CMT20",
+            "CMT30",
         ]
         if tenors:
             tenors = ["Date"] + tenors

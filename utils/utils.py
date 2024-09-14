@@ -512,3 +512,41 @@ def get_cstrips_cusips(
     active_df = active_df[active_df[tint_cusip].notna()]
     active_df = active_df.sort_values(by=["maturity_date"]).reset_index(drop=True)
     return active_df[["maturity_date", tint_cusip]] 
+
+
+def enhanced_plotly_blue_scale():
+    enhanced_blue_scale = [
+        [0.0, "#0508b8"],  # Deepest blue
+        [0.02, "#0508b8"],  # Extending deepest blue
+        [0.04, "#0610b9"],  # Very subtle shift
+        [0.06, "#0712ba"],  # Slightly lighter
+        [0.08, "#0814bb"],  # Incrementally lighter
+        [0.10, "#0916bc"],  # Another slight lightening
+        [0.12, "#0a18bd"],  # Continuing the trend
+        [0.14, "#0b1abd"],  # Gradual lightening
+        [0.16, "#0c1cbe"],  # More noticeable change
+        [0.18, "#0d1ebe"],  # Further lightening
+        [0.20, "#0e20bf"],  # Approaching mid blues
+        [0.25, "#1116e8"],  # Jumping to a lighter blue for contrast
+        [0.3, "#1910d8"],   # Original Plotly3 blue
+    ]
+
+    # Transitioning back to the original Plotly3 scale, starting from a point after the enhanced blue
+    transition_scale = [
+        [0.35, "#3c19f0"],
+        [0.40, "#6b1cfb"],
+        [0.45, "#981cfd"],
+        [0.50, "#bf1cfd"],
+        [0.55, "#dd2bfd"],
+        [0.60, "#f246fe"],
+        [0.65, "#fc67fd"],
+        [0.70, "#fe88fc"],
+        [0.75, "#fea5fd"],
+        [0.80, "#febefe"],
+        [0.85, "#fec3fe"],
+    ]
+
+    # Combine the more granular blue scale with the rest of the Plotly3 colors
+    combined_scale = enhanced_blue_scale + transition_scale
+    
+    return combined_scale
