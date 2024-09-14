@@ -72,47 +72,59 @@ def download_historical_data_yahoofinance(
     ticker: str,
     from_date: datetime,
     to_date: datetime,
-    raw_path: str,
-    cj: http.cookiejar = None,
-    open_chrome=False,
+    raw_path: str = None,
 ):
     from_sec = round(from_date.timestamp())
     to_sec = round(to_date.timestamp())
-    base_url = f"https://query1.finance.yahoo.com/v7/finance/download/{ticker}?period1={from_sec}&period2={to_sec}&interval=1d&events=history&includeAdjustedClose=true"
+    base_url = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}?period1={from_sec}&period2={to_sec}&interval=1d&events=history&includeAdjustedClose=true"
 
-    webbrowser.open(base_url) if open_chrome else None
-    _, crumb = get_yahoofinance_download_auth("/v1/test/getcrumb", cj, True)
+    _, crumb = get_yahoofinance_download_auth("/v1/test/getcrumb", None, True)
     headers = get_yahoofinance_download_auth(
-        f"/v7/finance/download/{ticker}?period1={from_sec}&amp;period2={to_sec}&amp;interval=1d&amp;events=history&amp;includeAdjustedClose=true&crumb={crumb}&formatted=false&region=US&lang=en-US",
-        cj,
+        f"/v8/finance/chart/{ticker}?period1={from_sec}&amp;period2={to_sec}&amp;interval=1d&amp;events=history&amp;includeAdjustedClose=true&crumb={crumb}&formatted=false&region=US&lang=en-US",
     )
-    os.system("taskkill /im chrome.exe /f") if open_chrome else None
 
     res_url = f"{base_url}&crumb={crumb}&formatted=false&region=US&lang=en-US"
     response = requests.get(res_url, headers=headers, allow_redirects=True)
-    full_file_path = os.path.join(raw_path, f"{ticker}_yahoofin_historical_data.csv")
-    if response.status_code == 200:
-        with open(full_file_path, mode="wb") as file:
-            chunk_size = 10 * 1024
-            for chunk in response.iter_content(chunk_size=chunk_size):
-                file.write(chunk)
-
-        df = pd.read_csv(full_file_path)
-        df.to_excel(f"{full_file_path.split('.')[0]}.xlsx", index=False)
-        os.remove(full_file_path)
-
+    if response.ok:
+        json_data = response.json()
+        df = pd.DataFrame(
+            {
+                "Date": json_data["chart"]["result"][0]["timestamp"],
+                "Open": json_data["chart"]["result"][0]["indicators"]["quote"][0][
+                    "open"
+                ],
+                "High": json_data["chart"]["result"][0]["indicators"]["quote"][0][
+                    "high"
+                ],
+                "Low": json_data["chart"]["result"][0]["indicators"]["quote"][0]["low"],
+                "Close": json_data["chart"]["result"][0]["indicators"]["quote"][0][
+                    "close"
+                ],
+                "Adj Close": json_data["chart"]["result"][0]["indicators"]["adjclose"][
+                    0
+                ]["adjclose"],
+                "Volume": json_data["chart"]["result"][0]["indicators"]["quote"][0][
+                    "volume"
+                ],
+            }
+        )
+        df["Date"] = pd.to_datetime(df["Date"], utc=True, unit="s")
+        df["Date"] = df["Date"].dt.tz_convert("America/New_York")
+        if raw_path:
+            df.to_excel(raw_path)
         return df
+
+    print(f"yf fetch failed with status: {response.status_code}")
+    return pd.DataFrame()
 
 
 def multi_download_historical_data_yahoofinance(
     tickers: List[str],
     from_date: datetime,
     to_date: datetime,
-    raw_path: str,
-    cj: http.cookiejar = None,
+    data_dump_dir: str = None,
     max_date=False,
     big_wb=False,
-    open_chrome=False,
 ) -> Dict[str, pd.DataFrame]:
     from_sec = round(from_date.timestamp())
     to_sec = (
@@ -125,54 +137,57 @@ def multi_download_historical_data_yahoofinance(
         session: aiohttp.ClientSession, url: str, curr_ticker: str, crumb: str
     ) -> pd.DataFrame:
         try:
-            webbrowser.open(url) if open_chrome else None
             headers = get_yahoofinance_download_auth(
-                f"/v7/finance/download/{curr_ticker}?period1={from_sec}&amp;period2={to_sec}&amp;interval=1d&amp;events=history&amp;includeAdjustedClose=true&crumb={crumb}&formatted=false&region=US&lang=en-US",
-                cj,
-            )
-            os.system("taskkill /im chrome.exe /f") if open_chrome else None
-
-            full_file_path = os.path.join(
-                raw_path, f"{curr_ticker}_yahoofin_historical_data.csv"
+                f"/v8/finance/chart/{curr_ticker}?period1={from_sec}&amp;period2={to_sec}&amp;interval=1d&amp;events=history&amp;includeAdjustedClose=true&crumb={crumb}&formatted=false&region=US&lang=en-US",
             )
             res_url = f"{url}&crumb={crumb}&formatted=false&region=US&lang=en-US"
             async with session.get(res_url, headers=headers) as response:
-                if response.status == 200:
-                    with open(full_file_path, "wb") as f:
-                        chunk_size = 10 * 1024
-                        while True:
-                            chunk = await response.content.read(chunk_size)
-                            if not chunk:
-                                break
-                            f.write(chunk)
-
-                    renamed = await convert_csv_to_excel(full_file_path)
-                    return pd.read_excel(renamed)
+                if response.ok:
+                    json_data = await response.json()
+                    df = pd.DataFrame(
+                        {
+                            "Date": json_data["chart"]["result"][0]["timestamp"],
+                            "Open": json_data["chart"]["result"][0]["indicators"]["quote"][0][
+                                "open"
+                            ],
+                            "High": json_data["chart"]["result"][0]["indicators"]["quote"][0][
+                                "high"
+                            ],
+                            "Low": json_data["chart"]["result"][0]["indicators"]["quote"][0]["low"],
+                            "Close": json_data["chart"]["result"][0]["indicators"]["quote"][0][
+                                "close"
+                            ],
+                            "Adj Close": json_data["chart"]["result"][0]["indicators"]["adjclose"][
+                                0
+                            ]["adjclose"],
+                            "Volume": json_data["chart"]["result"][0]["indicators"]["quote"][0][
+                                "volume"
+                            ],
+                        }
+                    )
+                    df["Date"] = pd.to_datetime(df["Date"], utc=True, unit="s")
+                    df["Date"] = df["Date"].dt.tz_convert("America/New_York")
+                    df["Date"] = df["Date"].dt.tz_localize(None)
+                    df["Date"] = df["Date"].dt.date
+                    if data_dump_dir:
+                        df.to_excel(fr"{data_dump_dir}\{curr_ticker}.xlsx", index=False)
+                    return df 
                 else:
                     raise Exception(f"Bad Status: {response.status} - on {curr_ticker}")
         except Exception as e:
             print(e)
-            return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Adj Close", "Volume"])
-
-    async def convert_csv_to_excel(full_file_path: str | None) -> str:
-        if not full_file_path:
-            return
-
-        df = pd.read_csv(full_file_path)
-        df.to_excel(f"{full_file_path.split('.')[0]}.xlsx", index=False)
-        os.remove(full_file_path)
-
-        return f"{full_file_path.split('.')[0]}.xlsx"
+            return pd.DataFrame(
+                columns=["Open", "High", "Low", "Close", "Adj Close", "Volume"]
+            )
 
     async def get_promises(session: aiohttp.ClientSession):
         tasks = []
-        _, crumb = get_yahoofinance_download_auth("/v1/test/getcrumb", cj, True)
+        _, crumb = get_yahoofinance_download_auth("/v1/test/getcrumb", None, True)
         for ticker in tickers:
             if max_date:
                 try:
                     headers = get_yahoofinance_download_auth(
                         f"v8/finance/chart/{ticker}?formatted=true&crumb={crumb}&lang=en-US&region=US&includeAdjustedClose=true&corsDomain=finance.yahoo.com",
-                        cj,
                     )
                     first_trade_date_url = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}?formatted=true&crumb={crumb}&lang=en-US&region=US&includeAdjustedClose=true&corsDomain=finance.yahoo.com"
                     first_trade_date = requests.get(
@@ -184,8 +199,8 @@ def multi_download_historical_data_yahoofinance(
                     from_sec = round(from_date.timestamp())
             else:
                 from_sec = round(from_date.timestamp())
-            
-            curr_url = f"https://query1.finance.yahoo.com/v7/finance/download/{ticker}?period1={from_sec}&period2={to_sec}&interval=1d&events=history&includeAdjustedClose=true"
+
+            curr_url = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}?period1={from_sec}&period2={to_sec}&interval=1d&events=history&includeAdjustedClose=true"
             task = fetch(session, curr_url, ticker, crumb)
             tasks.append(task)
 
@@ -196,14 +211,11 @@ def multi_download_historical_data_yahoofinance(
             all_data = await get_promises(session)
             return all_data
 
-    os.mkdir(f"{raw_path}/temp")
     dfs = asyncio.run(run_fetch_all())
-    os.rmdir(f"{raw_path}/temp")
-    os.system("taskkill /im chrome.exe /f") if open_chrome else None
 
     if big_wb:
         tickers_str = str.join("_", [str(x) for x in tickers])
-        wb_file_name = f"{raw_path}\{tickers_str}_yahoofin_historical_data.xlsx"
+        wb_file_name = f"{data_dump_dir}/{tickers_str}_yahoofin_historical_data.xlsx"
         with pd.ExcelWriter(wb_file_name) as writer:
             for i, df in enumerate(dfs, 0):
                 try:
@@ -331,9 +343,11 @@ def get_options_chain_yahoofinance(
                         call_raw_dict = call_raw.items() if call_raw else None
                         call = (
                             {
-                                key: value.get("raw", value)
-                                if isinstance(value, dict)
-                                else value
+                                key: (
+                                    value.get("raw", value)
+                                    if isinstance(value, dict)
+                                    else value
+                                )
                                 for key, value in call_raw_dict
                                 if call_raw_dict
                             }
@@ -345,9 +359,11 @@ def get_options_chain_yahoofinance(
                         put_raw_dict = put_raw.items() if put_raw else None
                         put = (
                             {
-                                key: value.get("raw", value)
-                                if isinstance(value, dict)
-                                else value
+                                key: (
+                                    value.get("raw", value)
+                                    if isinstance(value, dict)
+                                    else value
+                                )
                                 for key, value in put_raw_dict
                                 if put_raw_dict
                             }
@@ -463,7 +479,7 @@ def get_options_chain_yahoofinance(
 # def get_futures_chain(
 #     ticker: str, raw_path: str, cj: http.cookiejar = None, big_wb=False
 # ):
-    
+
 #     pass
 
 
@@ -472,9 +488,9 @@ if __name__ == "__main__":
 
     from_date = datetime(2023, 1, 1)
     to_date = datetime.today()
-    
+
     natgas = ["BOIL", "UNG", "KOLD"]
-    rates = ["SVOL", "PFIX", "TUA", "TYA", "MTBA", "^MOVE", "^VIX", "VMBS", "^GSPC"] 
+    rates = ["SVOL", "PFIX", "TUA", "TYA", "MTBA", "^MOVE", "^VIX", "VMBS", "^GSPC"]
     dict = multi_download_historical_data_yahoofinance(
         rates,
         from_date,

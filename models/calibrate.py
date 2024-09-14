@@ -12,7 +12,7 @@ from models.DieboldLi import DieboldLiCurve
 from models.MLESM import MerrillLynchExponentialSplineModel
 from models.NelsonSiegel import NelsonSiegelCurve
 from models.NelsonSiegelSvensson import NelsonSiegelSvenssonCurve
-from models.PCA import PCACurve
+# from models.PCA import PCACurve
 from models.SmithWilson import SmithWilsonCurve, find_ufr_ytm
 from numpy.linalg import lstsq
 from scipy.optimize import OptimizeResult, minimize
@@ -264,11 +264,11 @@ def calibrate_smith_wilson_ols(
     return calibrated_curve, result
 
 
-def calibrate_pca_yield_curve(
-    ytms: npt.NDArray[np.float64], historical_df: pd.DataFrame, n_components: int = 3, use_changes: bool = False
-) -> Tuple[PCACurve, Any]:
-    if use_changes:
-        historical_df = historical_df.diff().dropna()
-    pca_model = PCACurve(n_components=n_components)
-    pca_model.fit(ytms)
-    return pca_model, pca_model.explained_variance
+# def calibrate_pca_yield_curve(
+#     ytms: npt.NDArray[np.float64], historical_df: pd.DataFrame, n_components: int = 3, use_changes: bool = False
+# ) -> Tuple[PCACurve, Any]:
+#     if use_changes:
+#         historical_df = historical_df.diff().dropna()
+#     pca_model = PCACurve(n_components=n_components)
+#     pca_model.fit(ytms)
+#     return pca_model, pca_model.explained_variance

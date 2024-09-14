@@ -18,6 +18,7 @@ from DataFetcher.nyfrb import NYFRBDataFetcher
 from DataFetcher.public_dotcom import PublicDotcomDataFetcher
 from DataFetcher.ust import USTreasuryDataFetcher
 from DataFetcher.wsj import WSJDataFetcher
+from DataFetcher.yf import YahooFinanceDataFetcher 
 
 from utils.QL_BondPricer import QL_BondPricer
 from utils.RL_BondPricer import RL_BondPricer
@@ -103,6 +104,7 @@ class CurveDataFetcher():
     finra_data_fetcher: FinraDataFetcher = None
     bondsupermart_fetcher: BondSupermartDataFetcher = None
     wsj_data_fetcher: WSJDataFetcher = None
+    yf_data_fetcher: YahooFinanceDataFetcher = None
     
     def __init__(
         self,
@@ -173,6 +175,14 @@ class CurveDataFetcher():
         )
         
         self.wsj_data_fetcher = WSJDataFetcher(
+            global_timeout=global_timeout,
+            proxies=proxies,
+            debug_verbose=debug_verbose,
+            info_verbose=info_verbose,
+            error_verbose=error_verbose,
+        )
+        
+        self.yf_data_fetcher = YahooFinanceDataFetcher(
             global_timeout=global_timeout,
             proxies=proxies,
             debug_verbose=debug_verbose,

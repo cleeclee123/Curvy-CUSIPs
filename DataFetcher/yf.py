@@ -7,7 +7,10 @@ import pandas as pd
 from functools import reduce
 
 from DataFetcher.base import DataFetcherBase
-from ..utils.utils import get_isin_from_cusip
+from DataFetcher.yf_legacy import (
+    multi_download_historical_data_yahoofinance,
+    download_historical_data_yahoofinance,
+)
 
 warnings.filterwarnings("ignore", category=pd.errors.SettingWithCopyWarning)
 warnings.simplefilter(action="ignore", category=FutureWarning)
@@ -36,6 +39,38 @@ class YahooFinanceDataFetcher(DataFetcherBase):
             error_verbose=error_verbose,
         )
 
+    def fetch_yf_legacy_multi_tickers(
+        self,
+        tickers: List[str],
+        from_date: datetime,
+        to_date: datetime,
+        data_dump_dir: Optional[str] = None,
+        max_date=False,
+        big_wb=False,
+    ):
+        return multi_download_historical_data_yahoofinance(
+            tickers=tickers,
+            from_date=from_date,
+            to_date=to_date,
+            data_dump_dir=data_dump_dir,
+            max_date=max_date,
+            big_wb=big_wb,
+        )
+
+    def fetch_yf_legacy(
+        self,
+        ticker: str,
+        from_date: datetime,
+        to_date: datetime,
+        raw_path: Optional[str] = None,
+    ):
+        return download_historical_data_yahoofinance(
+            ticker=ticker,
+            from_date=from_date,
+            to_date=to_date,
+            raw_path=raw_path,
+        )
+
     async def _fetch_cusip_timeseries_yahoofinance(
         self,
         client: httpx.AsyncClient,
@@ -49,7 +84,8 @@ class YahooFinanceDataFetcher(DataFetcherBase):
         uid: Optional[str | int] = None,
     ):
         pass
-    
+
+
 # start_date = datetime(2024, 5, 1)
 # end_date = datetime(2024, 5, 31)
 # period1 = int(start_date.timestamp())
