@@ -160,6 +160,7 @@ def run_pca_yield_curve(
     show_bull_flattening_periods: Optional[bool] = False,
     show_bear_flattening_periods: Optional[bool] = False,
     is_cmt_df=False,
+    is_cusips=False,
 ):
     df = df.copy()
     if date_subset_range:
@@ -301,12 +302,12 @@ def run_pca_yield_curve(
                     y=[0, pca_obj.components_[2, i]],
                     z=[0, pca_obj.components_[1, i]],
                     mode="lines+text",
-                    line=dict(color=default_tenor_vect_color[tenor], width=3),
+                    line=dict(color=default_tenor_vect_color[tenor], width=3) if not is_cusips else None,
                     text=["", tenor],
                     textposition="top center",
-                    textfont=dict(color=default_tenor_vect_color[tenor]),
+                    textfont=dict(color=default_tenor_vect_color[tenor]) if not is_cusips else None,
                     hoverinfo="text",
-                    hoverlabel=dict(bgcolor=default_tenor_vect_color[tenor]),
+                    hoverlabel=dict(bgcolor=default_tenor_vect_color[tenor]) if not is_cusips else None,
                     name=tenor,
                 )
             )

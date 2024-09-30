@@ -36,19 +36,19 @@ class USTreasuryDataFetcher(DataFetcherBase):
     _use_ust_issue_date: bool = False
     _historical_auctions_df: pd.DataFrame = (None,)
     _valid_tenors_strings = [
-        "4-Week",
-        "8-Week",
-        "13-Week",
-        "17-Week",
-        "26-Week",
-        "52-Week",
-        "2-Year",
-        "3-Year",
-        "5-Year",
-        "7-Year",
-        "10-Year",
-        "20-Year",
-        "30-Year",
+        "CMT1M",
+        "CMT2M",
+        "CMT3M",
+        "CMT4M",
+        "CMT6M",
+        "CMT1",
+        "CMT2",
+        "CMT3",
+        "CMT5",
+        "CMT7",
+        "CMT10",
+        "CMT20",
+        "CMT30",
     ]
 
     def __init__(
@@ -67,9 +67,48 @@ class USTreasuryDataFetcher(DataFetcherBase):
             info_verbose=info_verbose,
             error_verbose=error_verbose,
         )
-        
+
         self._use_ust_issue_date = use_ust_issue_date
         self._historical_auctions_df = self.get_auctions_df()
+        self._historical_auctions_df["int_rate"] = pd.to_numeric(
+            self._historical_auctions_df["int_rate"], errors="coerce"
+        )
+        self._historical_auctions_df["maturity_date"] = pd.to_datetime(
+            self._historical_auctions_df["maturity_date"], errors="coerce"
+        )
+        self._historical_auctions_df["ust_label"] = self._historical_auctions_df.apply(
+            lambda row: f"{row['int_rate']:.3f}% {row['maturity_date'].strftime('%b-%y')}",
+            axis=1,
+        )
+
+    # ust label: f"{coupon}s {datetime.strftime("%Y-%m-%d")}"
+    def cme_ust_label_to_cusip(self, ust_label: str):
+        try:
+            coupon = float(ust_label.split("s")[0])
+            maturity = ust_label.split(" ")[1]
+            ust_row = self._historical_auctions_df[
+                (self._historical_auctions_df["int_rate"] == coupon)
+                & (self._historical_auctions_df["maturity_date"] == maturity)
+            ]
+            return ust_row.to_dict("records")[0]
+        except:
+            raise Exception("LABEL NOT FOUND")
+        
+    def cusip_to_cme_ust_label(self, cusip: str):
+        ust_row = self._historical_auctions_df[self._historical_auctions_df["cusip"] == cusip].to_dict("records")[0]
+        return f"{ust_row["int_rate"]}s {ust_row["maturity_date"]}"
+    
+    # ust_label = f"{row['int_rate']:.3f}% {row['maturity_date'].strftime('%b-%y')}" 
+    def ust_label_to_cusip(self, ust_label: str):
+        try:
+            ust_row = self._historical_auctions_df[self._historical_auctions_df["ust_label"] == ust_label]
+            return ust_row.to_dict("records")[0]
+        except:
+            raise Exception("LABEL NOT FOUND")
+        
+    def cusip_to_ust_label(self, cusip: str):
+        ust_row = self._historical_auctions_df[self._historical_auctions_df["cusip"] == cusip].to_dict("records")[0]
+        return ust_row["ust_label"] 
 
     async def _build_fetch_tasks_historical_treasury_auctions(
         self,
@@ -265,9 +304,11 @@ class USTreasuryDataFetcher(DataFetcherBase):
                 print(msg)
 
         df_par_rates.columns = ["Date"] + self._valid_tenors_strings
+        
         if tenors:
             tenors = ["Date"] + tenors
             return df_par_rates[tenors]
+        
         return df_par_rates
 
     async def _build_fetch_tasks_historical_stripping_activity(

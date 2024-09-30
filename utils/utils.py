@@ -374,7 +374,9 @@ def historical_auction_cols():
 def ust_labeler(row: pd.Series):
     mat_date = row["maturity_date"]
     tenor = row["original_security_term"]
-    return mat_date.strftime("%b %y") + "s" + ", " + tenor
+    if np.isnan(row["int_rate"]):
+        return str(row["high_investment_rate"])[:5] + "s , " + mat_date.strftime("%b %y") + "s" + ", " + tenor
+    return str(row["int_rate"]) + "s, " + mat_date.strftime("%b %y") + "s, " + tenor
 
 
 def ust_sorter(term: str):

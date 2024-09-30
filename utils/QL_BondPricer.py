@@ -58,7 +58,7 @@ class QL_BondPricer:
         issue_ql_date = QL_BondPricer._pydatetime_to_qldate(issue_date)
         maturity_ql_date = QL_BondPricer._pydatetime_to_qldate(maturity_date)
         settlement_date = (
-            pd.to_datetime(as_of) + pd.tseries.offsets.BDay(2)
+            pd.to_datetime(as_of) + pd.tseries.offsets.BDay(1)
         ).to_pydatetime()
         settlement_ql_date = QL_BondPricer._pydatetime_to_qldate(settlement_date)
 

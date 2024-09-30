@@ -8,6 +8,7 @@ from typing import Dict, List, Optional
 import httpx
 import numpy as np
 import pandas as pd
+from scipy.optimize import newton
 
 from DataFetcher.base import DataFetcherBase
 from DataFetcher.bondsupermart import BondSupermartDataFetcher
@@ -18,8 +19,7 @@ from DataFetcher.nyfrb import NYFRBDataFetcher
 from DataFetcher.public_dotcom import PublicDotcomDataFetcher
 from DataFetcher.ust import USTreasuryDataFetcher
 from DataFetcher.wsj import WSJDataFetcher
-from DataFetcher.yf import YahooFinanceDataFetcher 
-
+from DataFetcher.yf import YahooFinanceDataFetcher
 from utils.QL_BondPricer import QL_BondPricer
 from utils.RL_BondPricer import RL_BondPricer
 from utils.utils import (
@@ -95,7 +95,7 @@ def calculate_yields(row, as_of_date, use_quantlib=False):
     return offer_yield, bid_yield, eod_yield
 
 
-class CurveDataFetcher():
+class CurveDataFetcher:
     ust_data_fetcher: USTreasuryDataFetcher = None
     fedinvest_data_fetcher: FedInvestDataFetcher = None
     nyfrb_data_fetcher: NYFRBDataFetcher = None
@@ -105,7 +105,7 @@ class CurveDataFetcher():
     bondsupermart_fetcher: BondSupermartDataFetcher = None
     wsj_data_fetcher: WSJDataFetcher = None
     yf_data_fetcher: YahooFinanceDataFetcher = None
-    
+
     def __init__(
         self,
         use_ust_issue_date: Optional[bool] = False,
@@ -173,7 +173,7 @@ class CurveDataFetcher():
             info_verbose=info_verbose,
             error_verbose=error_verbose,
         )
-        
+
         self.wsj_data_fetcher = WSJDataFetcher(
             global_timeout=global_timeout,
             proxies=proxies,
@@ -181,7 +181,7 @@ class CurveDataFetcher():
             info_verbose=info_verbose,
             error_verbose=error_verbose,
         )
-        
+
         self.yf_data_fetcher = YahooFinanceDataFetcher(
             global_timeout=global_timeout,
             proxies=proxies,
@@ -189,9 +189,93 @@ class CurveDataFetcher():
             info_verbose=info_verbose,
             error_verbose=error_verbose,
         )
-    
+
+    @staticmethod
+    def par_bond_equation(c, maturity, zero_curve_func):
+        discounted_cash_flows = sum(
+            (c / 2) * np.exp(-(zero_curve_func(t) / 100) * t)
+            for t in np.arange(0.5, maturity + 0.5, 0.5)
+        )
+        final_payment = 100 * np.exp(-(zero_curve_func(maturity) / 100) * maturity)
+        return discounted_cash_flows + final_payment - 100
+
+    @staticmethod
+    def par_curve_func(tenor, zero_curve_func):
+        init_guess = 4
+        return newton(
+            CurveDataFetcher.par_bond_equation,
+            x0=init_guess,
+            args=(tenor, zero_curve_func),
+        )
+
     def async_runner(self, tasks):
         pass
+
+    # one of cme_ust_labels, ust_label_spread, cusip_spread has to be defined
+    # default delimtter "/"
+    def fetch_spreads(
+        self,
+        start_date: datetime,
+        end_date: datetime,
+        use_bid_side: Optional[bool] = False,
+        use_offer_side: Optional[bool] = False,
+        use_mid_side: Optional[bool] = False,
+        cme_ust_labels: Optional[str] = None,
+        ust_label_spread: Optional[str] = None,
+        cusip_spread: Optional[str] = None,
+        spread_delimtter: Optional[str] = "/"
+    ) -> pd.DataFrame:
+        spread_label = ""
+        if ust_label_spread:
+            labels_to_fetch = ust_label_spread.split(spread_delimtter)
+            cusips_to_fetch = [
+                self.ust_data_fetcher.ust_label_to_cusip(label.strip())["cusip"]
+                for label in labels_to_fetch
+            ]
+            spread_label = ust_label_spread
+        if cme_ust_labels:
+            labels_to_fetch = cme_ust_labels.split(spread_delimtter)
+            cusips_to_fetch = [
+                self.ust_data_fetcher.cme_ust_label_to_cusip(label.strip())["cusip"]
+                for label in labels_to_fetch
+            ]
+            spread_label = cme_ust_labels
+        if cusip_spread:
+            cusips_to_fetch = cusip_spread.split(spread_delimtter)
+            spread_label = cusip_spread
+
+        if len(cusips_to_fetch) < 2:
+            return "not a valid spread"
+
+        cusip_dict_df = self.fedinvest_data_fetcher.cusips_timeseries(
+            cusips=cusips_to_fetch, start_date=start_date, end_date=end_date
+        )
+        
+        yield_col = "eod_yield"
+        if use_bid_side:
+            yield_col = "bid_yield"
+        elif use_offer_side:
+            yield_col = "offer_yield"
+        elif use_mid_side:
+            yield_col = "mid_yield"
+
+        dfs = [
+            df[["Date", yield_col]].rename(
+                columns={yield_col: f"{self.ust_data_fetcher.cusip_to_ust_label(key)}"}
+            )
+            for key, df in cusip_dict_df.items()
+        ]
+        merged_df = reduce(
+            lambda left, right: pd.merge(left, right, on="Date", how="outer"), dfs
+        )
+        if len(cusips_to_fetch) == 3:
+            merged_df[spread_label] = (merged_df.iloc[:, 2] - merged_df.iloc[:, 1]) - (
+                (merged_df.iloc[:, 3] - merged_df.iloc[:, 2])
+            )
+        else:
+            merged_df[spread_label] = merged_df.iloc[:, 2] - merged_df.iloc[:, 1]
+            
+        return merged_df
 
     def build_curve_set(
         self,
@@ -336,10 +420,10 @@ class CurveDataFetcher():
                             f"{quote_type}_yield": tup[1].iloc[-1]["YTM"],
                         }
                     )
-                    continue
+                continue
 
-            # ideally should neever get here
-            self._logger.warning(f"CURVE SET - unknown UID, Current Tuple: {tup}")
+            # should neever get here
+            print(f"CURVE SET - unknown UID, Current Tuple: {tup}")
 
         auctions_df = get_active_cusips(
             historical_auctions_df=self.ust_data_fetcher._historical_auctions_df,

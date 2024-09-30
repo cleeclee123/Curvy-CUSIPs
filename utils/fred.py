@@ -88,7 +88,6 @@ class Fred:
         helper function for fetching data given a request URL
         """
         url += "&api_key=" + self.api_key
-        print(url)
         try:
             response = urlopen(url)
             root = ET.fromstring(response.read())
@@ -196,7 +195,7 @@ class Fred:
         return pd.Series(data)
 
     def get_multiple_series(
-        self, series_ids, observation_start=None, observation_end=None, one_df=False, **kwargs,
+        self, series_ids, observation_start=None, observation_end=None, one_df=False, enable_date_col=False, **kwargs,
     ):
         async def build_tasks(
             client: httpx.AsyncClient,
@@ -253,7 +252,10 @@ class Fred:
         
         if one_df:
             df = pd.concat(results, axis=1)
-            df.columns = series_ids 
+            df.columns = series_ids
+            if enable_date_col:
+                df.insert(0, 'Date', df.index)
+                df = df.reset_index(drop=True)
             return df
         
         return results
