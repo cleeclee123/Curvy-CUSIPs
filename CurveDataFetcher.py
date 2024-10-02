@@ -3,11 +3,15 @@ import multiprocessing as mp
 import warnings
 from datetime import datetime
 from functools import partial, reduce
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
+import time
 import httpx
 import numpy as np
 import pandas as pd
+import polars as pl
+from pandas.tseries.offsets import CustomBusinessDay, BDay
+from pandas.tseries.holiday import USFederalHolidayCalendar
 from scipy.optimize import newton
 
 from DataFetcher.base import DataFetcherBase
@@ -192,10 +196,7 @@ class CurveDataFetcher:
 
     @staticmethod
     def par_bond_equation(c, maturity, zero_curve_func):
-        discounted_cash_flows = sum(
-            (c / 2) * np.exp(-(zero_curve_func(t) / 100) * t)
-            for t in np.arange(0.5, maturity + 0.5, 0.5)
-        )
+        discounted_cash_flows = sum((c / 2) * np.exp(-(zero_curve_func(t) / 100) * t) for t in np.arange(0.5, maturity + 0.5, 0.5))
         final_payment = 100 * np.exp(-(zero_curve_func(maturity) / 100) * maturity)
         return discounted_cash_flows + final_payment - 100
 
@@ -223,22 +224,16 @@ class CurveDataFetcher:
         cme_ust_labels: Optional[str] = None,
         ust_label_spread: Optional[str] = None,
         cusip_spread: Optional[str] = None,
-        spread_delimtter: Optional[str] = "/"
+        spread_delimtter: Optional[str] = "/",
     ) -> pd.DataFrame:
         spread_label = ""
         if ust_label_spread:
             labels_to_fetch = ust_label_spread.split(spread_delimtter)
-            cusips_to_fetch = [
-                self.ust_data_fetcher.ust_label_to_cusip(label.strip())["cusip"]
-                for label in labels_to_fetch
-            ]
+            cusips_to_fetch = [self.ust_data_fetcher.ust_label_to_cusip(label.strip())["cusip"] for label in labels_to_fetch]
             spread_label = ust_label_spread
         if cme_ust_labels:
             labels_to_fetch = cme_ust_labels.split(spread_delimtter)
-            cusips_to_fetch = [
-                self.ust_data_fetcher.cme_ust_label_to_cusip(label.strip())["cusip"]
-                for label in labels_to_fetch
-            ]
+            cusips_to_fetch = [self.ust_data_fetcher.cme_ust_label_to_cusip(label.strip())["cusip"] for label in labels_to_fetch]
             spread_label = cme_ust_labels
         if cusip_spread:
             cusips_to_fetch = cusip_spread.split(spread_delimtter)
@@ -247,10 +242,8 @@ class CurveDataFetcher:
         if len(cusips_to_fetch) < 2:
             return "not a valid spread"
 
-        cusip_dict_df = self.fedinvest_data_fetcher.cusips_timeseries(
-            cusips=cusips_to_fetch, start_date=start_date, end_date=end_date
-        )
-        
+        cusip_dict_df = self.fedinvest_data_fetcher.cusips_timeseries(cusips=cusips_to_fetch, start_date=start_date, end_date=end_date)
+
         yield_col = "eod_yield"
         if use_bid_side:
             yield_col = "bid_yield"
@@ -260,22 +253,158 @@ class CurveDataFetcher:
             yield_col = "mid_yield"
 
         dfs = [
-            df[["Date", yield_col]].rename(
-                columns={yield_col: f"{self.ust_data_fetcher.cusip_to_ust_label(key)}"}
-            )
+            df[["Date", yield_col]].rename(columns={yield_col: f"{self.ust_data_fetcher.cusip_to_ust_label(key)}"})
             for key, df in cusip_dict_df.items()
         ]
-        merged_df = reduce(
-            lambda left, right: pd.merge(left, right, on="Date", how="outer"), dfs
-        )
+        merged_df = reduce(lambda left, right: pd.merge(left, right, on="Date", how="outer"), dfs)
         if len(cusips_to_fetch) == 3:
-            merged_df[spread_label] = (merged_df.iloc[:, 2] - merged_df.iloc[:, 1]) - (
-                (merged_df.iloc[:, 3] - merged_df.iloc[:, 2])
-            )
+            merged_df[spread_label] = (merged_df.iloc[:, 2] - merged_df.iloc[:, 1]) - ((merged_df.iloc[:, 3] - merged_df.iloc[:, 2]))
         else:
             merged_df[spread_label] = merged_df.iloc[:, 2] - merged_df.iloc[:, 1]
-            
+
         return merged_df
+
+    def fetch_historical_curve_sets(
+        self,
+        start_date: datetime,
+        end_date: datetime,
+        fetch_soma_holdings=False,
+        fetch_stripping_data=False,
+        calc_free_float=False,
+    ):
+        if calc_free_float:
+            fetch_soma_holdings = True
+            fetch_stripping_data = True
+
+        async def gather_tasks(client: httpx.AsyncClient, dates: datetime):
+            tasks = await self.fedinvest_data_fetcher._build_fetch_tasks_cusip_prices_from_github(
+                client=client,
+                dates=dates,
+                uid="ust_prices",
+                cols_to_return=(
+                    [
+                        "cusip",
+                        "offer_price",
+                        "offer_yield",
+                        "bid_price",
+                        "bid_yield",
+                        "mid_price",
+                        "mid_yield",
+                        "eod_price",
+                        "eod_yield",
+                    ]
+                ),
+            )
+
+            if fetch_soma_holdings:
+                soma_bwd_date: pd.Timestamp = start_date - BDay(5)
+                tasks += await self.nyfrb_data_fetcher._build_fetch_tasks_historical_soma_holdings(
+                    client=client,
+                    dates=[soma_bwd_date.to_pydatetime()] + dates,
+                    uid="soma_holdings",
+                    minimize_api_calls=True,
+                )
+
+            if fetch_stripping_data:
+                strips_bwd_date: pd.Timestamp = start_date - BDay(20)
+                tasks += await self.ust_data_fetcher._build_fetch_tasks_historical_stripping_activity(
+                    client=client,
+                    dates=[strips_bwd_date.to_pydatetime()] + dates,
+                    uid="ust_stripping",
+                    minimize_api_calls=True,
+                )
+
+            return await asyncio.gather(*tasks)
+
+        async def run_fetch_all(dates: datetime):
+            limits = httpx.Limits(max_connections=8)
+            async with httpx.AsyncClient(
+                limits=limits,
+            ) as client:
+                all_data = await gather_tasks(client=client, dates=dates)
+                return all_data
+
+        bdates = [
+            bday.to_pydatetime()
+            for bday in pd.bdate_range(
+                start=start_date,
+                end=end_date,
+                freq=CustomBusinessDay(calendar=USFederalHolidayCalendar()),
+            )
+        ]
+
+        t1 = time.time()
+        results: List[Tuple[datetime, pd.DataFrame, str]] = asyncio.run(run_fetch_all(dates=bdates))
+        sorted_results = sorted(results, key=lambda x: x[0])
+        print(f"DATA FETCHING TOOK: {time.time() - t1} secs")
+
+        t1 = time.time()
+        auctions_df: pl.DataFrame = pl.from_pandas(self.ust_data_fetcher._historical_auctions_df.copy())
+        auctions_df = auctions_df.filter(
+            (pl.col("security_type") == "Bill") | (pl.col("security_type") == "Note") | (pl.col("security_type") == "Bond")
+        )
+        auctions_df = auctions_df.with_columns(
+            pl.when(pl.col("original_security_term").str.contains("29-Year"))
+            .then(pl.lit("30-Year"))
+            .when(pl.col("original_security_term").str.contains("30-"))
+            .then(pl.lit("30-Year"))
+            .otherwise(pl.col("original_security_term"))
+            .alias("original_security_term")
+        )
+        print(f"AUCTIONS DF PREP TOOK: {time.time() - t1} secs")
+
+        last_seen_soma_holdings_df = None
+        last_seen_stripping_act_df = None
+        curveset_dict_df: Dict[datetime, List[pd.DataFrame]] = {}
+
+        t1 = time.time()
+        for tup in sorted_results:
+            curr_dt = tup[0]
+            uid = tup[-1]
+
+            if tup[1] is None or tup[1].empty:
+                continue
+
+            if uid == "soma_holdings":
+                last_seen_soma_holdings_df = pl.from_pandas(tup[1])
+                continue
+
+            if uid == "ust_stripping":
+                last_seen_stripping_act_df = pl.from_pandas(tup[1])
+                continue
+
+            if uid == "ust_prices":
+                price_df = pl.from_pandas(tup[1])
+                curr_auctions_df = auctions_df.filter(
+                    (pl.col("issue_date").dt.date() <= curr_dt.date()) & (pl.col("maturity_date") >= curr_dt)
+                ).unique(subset=["cusip"], keep="first")
+
+                merged_df = curr_auctions_df.join(price_df, on="cusip", how="outer")
+
+                if fetch_soma_holdings and last_seen_soma_holdings_df is not None:
+                    merged_df = merged_df.join(last_seen_soma_holdings_df, on="cusip", how="left")
+                if fetch_stripping_data and last_seen_stripping_act_df is not None:
+                    merged_df = merged_df.join(last_seen_stripping_act_df, on="cusip", how="left")
+
+                merged_df = merged_df.filter(pl.col("cusip").map_elements(is_valid_ust_cusip, return_dtype=pl.Boolean))
+                merged_df = merged_df.with_columns(pl.col("maturity_date").cast(pl.Datetime).alias("maturity_date"))
+                merged_df = merged_df.with_columns(((pl.col("maturity_date") - curr_dt).dt.total_days() / 365).alias("time_to_maturity"))
+                merged_df = merged_df.with_columns(
+                    pl.col("time_to_maturity").rank(descending=True, method="ordinal").over("original_security_term").sub(1).alias("rank")
+                )
+
+                if calc_free_float:
+                    merged_df = merged_df.with_columns(
+                        pl.col("parValue").cast(pl.Float64).fill_null(0).alias("parValue"),
+                        (pl.col("portion_stripped_amt").cast(pl.Float64).fill_null(0) * 1000).alias("portion_stripped_amt"),
+                        (pl.col("est_outstanding_amt").cast(pl.Float64).fill_null(0) * 1000).alias("est_outstanding_amt"),
+                        ((pl.col("est_outstanding_amt") - pl.col("parValue") - pl.col("portion_stripped_amt")) / 1_000_000).alias("free_float"),
+                    )
+
+                curveset_dict_df[curr_dt] = merged_df.to_pandas()
+
+        print(f"DF AGG TOOK: {time.time() - t1} secs")
+        return curveset_dict_df
 
     def build_curve_set(
         self,
@@ -298,9 +427,7 @@ class CurveDataFetcher:
         calc_mod_duration: Optional[bool] = False,
     ):
         if as_of_date.date() > datetime.today().date():
-            print(
-                f"crystal ball feature not implemented, yet - {as_of_date} is in the future"
-            )
+            print(f"crystal ball feature not implemented, yet - {as_of_date} is in the future")
             return
 
         if use_github or use_public_dotcom:
@@ -310,9 +437,7 @@ class CurveDataFetcher:
             if "cusip" not in market_cols_to_return:
                 market_cols_to_return.insert(0, "cusip")
 
-        quote_type = (
-            market_cols_to_return[1].split("_")[0] if market_cols_to_return else "eod"
-        )
+        quote_type = market_cols_to_return[1].split("_")[0] if market_cols_to_return else "eod"
         filtered_free_float_df_col = False
         if calc_free_float:
             if not include_soma_holdings and not include_auction_results:
@@ -400,12 +525,7 @@ class CurveDataFetcher:
                 auctions_dfs.append(tup[0])
                 continue
 
-            if (
-                uid == "ust_prices"
-                or uid == "soma_holdings"
-                or uid == "ust_stripping"
-                or uid == "ust_outstanding_amt"
-            ):
+            if uid == "ust_prices" or uid == "soma_holdings" or uid == "ust_stripping" or uid == "ust_outstanding_amt":
                 dfs.append(tup[1])
                 continue
 
@@ -437,13 +557,8 @@ class CurveDataFetcher:
             as_of_date=as_of_date,
             use_issue_date=self.ust_data_fetcher._use_ust_issue_date,
         )
-        auctions_df["is_on_the_run"] = auctions_df["cusip"].isin(
-            otr_cusips_df["cusip"].to_list()
-        )
-        auctions_df["label"] = auctions_df.apply(lambda row: ust_labeler(row), axis=1)
-        auctions_df["time_to_maturity"] = (
-            auctions_df["maturity_date"] - as_of_date
-        ).dt.days / 365
+        auctions_df["is_on_the_run"] = auctions_df["cusip"].isin(otr_cusips_df["cusip"].to_list())
+        auctions_df["time_to_maturity"] = (auctions_df["maturity_date"] - as_of_date).dt.days / 365
 
         if not include_auction_results or filtered_free_float_df_col:
             default_auction_cols = [
@@ -456,7 +571,7 @@ class CurveDataFetcher:
                 "int_rate",
                 "high_investment_rate",
                 "is_on_the_run",
-                "label",
+                "ust_label",
                 "security_term",
                 "original_security_term",
             ]
@@ -464,13 +579,9 @@ class CurveDataFetcher:
                 default_auction_cols.append("corpus_cusip")
             auctions_df = auctions_df[default_auction_cols]
 
-        merged_df = reduce(
-            lambda left, right: pd.merge(left, right, on="cusip", how="outer"), dfs
-        )
+        merged_df = reduce(lambda left, right: pd.merge(left, right, on="cusip", how="outer"), dfs)
         if not use_public_dotcom:
-            merged_df = pd.merge(
-                left=auctions_df, right=merged_df, on="cusip", how="outer"
-            )
+            merged_df = pd.merge(left=auctions_df, right=merged_df, on="cusip", how="outer")
         else:
             market_df = pd.merge(
                 left=auctions_df,
@@ -487,24 +598,10 @@ class CurveDataFetcher:
         merged_df = merged_df[merged_df["cusip"].apply(is_valid_ust_cusip)]
 
         if calc_free_float:
-            merged_df["parValue"] = pd.to_numeric(
-                merged_df["parValue"], errors="coerce"
-            ).fillna(0)
-            merged_df["portion_stripped_amt"] = (
-                pd.to_numeric(
-                    merged_df["portion_stripped_amt"], errors="coerce"
-                ).fillna(0)
-                * 1000
-            )
-            merged_df["outstanding_amt"] = (
-                pd.to_numeric(merged_df["outstanding_amt"], errors="coerce").fillna(0)
-                * 1000
-            )
-            merged_df["free_float"] = (
-                merged_df["outstanding_amt"]
-                - merged_df["parValue"]
-                - merged_df["portion_stripped_amt"]
-            ) / 1_000_000
+            merged_df["parValue"] = pd.to_numeric(merged_df["parValue"], errors="coerce").fillna(0)
+            merged_df["portion_stripped_amt"] = pd.to_numeric(merged_df["portion_stripped_amt"], errors="coerce").fillna(0) * 1000
+            merged_df["outstanding_amt"] = pd.to_numeric(merged_df["outstanding_amt"], errors="coerce").fillna(0) * 1000
+            merged_df["free_float"] = (merged_df["outstanding_amt"] - merged_df["parValue"] - merged_df["portion_stripped_amt"]) / 1_000_000
 
         if calc_mod_duration:
             merged_df["mod_dur"] = merged_df.apply(
@@ -516,11 +613,7 @@ class CurveDataFetcher:
                     ytm=(
                         row[
                             next(
-                                (
-                                    item
-                                    for item in market_cols_to_return
-                                    if "yield" in item
-                                ),
+                                (item for item in market_cols_to_return if "yield" in item),
                                 None,
                             )
                         ]
@@ -533,48 +626,27 @@ class CurveDataFetcher:
 
         if not market_cols_to_return:
             if not use_github:
-                merged_df["mid_price"] = (
-                    merged_df["offer_price"] + merged_df["bid_price"]
-                ) / 2
+                merged_df["mid_price"] = (merged_df["offer_price"] + merged_df["bid_price"]) / 2
             else:
-                merged_df["mid_yield"] = (
-                    merged_df["offer_yield"] + merged_df["bid_yield"]
-                ) / 2
+                merged_df["mid_yield"] = (merged_df["offer_yield"] + merged_df["bid_yield"]) / 2
 
         if calc_ytms:
-            calculate_yields_partial = partial(
-                calculate_yields, as_of_date=as_of_date, use_quantlib=use_quantlib
-            )
+            calculate_yields_partial = partial(calculate_yields, as_of_date=as_of_date, use_quantlib=use_quantlib)
             with mp.Pool(mp.cpu_count()) as pool:
-                results = pool.map(
-                    calculate_yields_partial, [row for _, row in merged_df.iterrows()]
-                )
+                results = pool.map(calculate_yields_partial, [row for _, row in merged_df.iterrows()])
             offer_yields, bid_yields, eod_yields = zip(*results)
             merged_df["offer_yield"] = offer_yields
             merged_df["bid_yield"] = bid_yields
             merged_df["eod_yield"] = eod_yields
-            merged_df["mid_yield"] = (
-                merged_df["offer_yield"] + merged_df["bid_yield"]
-            ) / 2
+            merged_df["mid_yield"] = (merged_df["offer_yield"] + merged_df["bid_yield"]) / 2
 
         merged_df = merged_df.replace("null", np.nan)
         merged_df = merged_df[merged_df["original_security_term"].notna()]
         if sorted:
-            merged_df["sort_key"] = merged_df["original_security_term"].apply(
-                ust_sorter
-            )
-            merged_df = (
-                merged_df.sort_values(by=["sort_key", "time_to_maturity"])
-                .drop(columns="sort_key")
-                .reset_index(drop=True)
-            )
+            merged_df["sort_key"] = merged_df["original_security_term"].apply(ust_sorter)
+            merged_df = merged_df.sort_values(by=["sort_key", "time_to_maturity"]).drop(columns="sort_key").reset_index(drop=True)
 
         if include_off_the_run_number:
-            merged_df["rank"] = (
-                merged_df.groupby("original_security_term")["time_to_maturity"].rank(
-                    ascending=False, method="first"
-                )
-                - 1
-            )
+            merged_df["rank"] = merged_df.groupby("original_security_term")["time_to_maturity"].rank(ascending=False, method="first") - 1
 
         return merged_df

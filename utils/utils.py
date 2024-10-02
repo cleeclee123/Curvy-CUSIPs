@@ -19,16 +19,19 @@ JSON: TypeAlias = dict[str, "JSON"] | list["JSON"] | str | int | float | bool | 
 
 
 def auction_df_filterer(historical_auctions_df: pd.DataFrame):
+    historical_auctions_df = historical_auctions_df.copy()
     historical_auctions_df["issue_date"] = pd.to_datetime(
         historical_auctions_df["issue_date"]
+        # , errors="coerce"
     )
     historical_auctions_df["maturity_date"] = pd.to_datetime(
         historical_auctions_df["maturity_date"]
+        # , errors="coerce"
     )
     historical_auctions_df["auction_date"] = pd.to_datetime(
         historical_auctions_df["auction_date"]
+        # , errors="coerce"
     )
-
     historical_auctions_df.loc[
         historical_auctions_df["original_security_term"].str.contains(
             "29-Year", case=False, na=False
@@ -41,13 +44,11 @@ def auction_df_filterer(historical_auctions_df: pd.DataFrame):
         ),
         "original_security_term",
     ] = "30-Year"
-
     historical_auctions_df = historical_auctions_df[
         (historical_auctions_df["security_type"] == "Bill")
         | (historical_auctions_df["security_type"] == "Note")
         | (historical_auctions_df["security_type"] == "Bond")
     ]
-
     return historical_auctions_df
 
 
@@ -290,6 +291,9 @@ def get_active_cusips(
     historical_auctions_df["int_rate"] = pd.to_numeric(
         historical_auctions_df["int_rate"], errors="coerce"
     )
+    historical_auctions_df["time_to_maturity"] = (
+        historical_auctions_df["maturity_date"] - as_of_date
+    ).dt.days / 365
     return historical_auctions_df
 
 
@@ -375,7 +379,14 @@ def ust_labeler(row: pd.Series):
     mat_date = row["maturity_date"]
     tenor = row["original_security_term"]
     if np.isnan(row["int_rate"]):
-        return str(row["high_investment_rate"])[:5] + "s , " + mat_date.strftime("%b %y") + "s" + ", " + tenor
+        return (
+            str(row["high_investment_rate"])[:5]
+            + "s , "
+            + mat_date.strftime("%b %y")
+            + "s"
+            + ", "
+            + tenor
+        )
     return str(row["int_rate"]) + "s, " + mat_date.strftime("%b %y") + "s, " + tenor
 
 
@@ -508,12 +519,14 @@ def get_cstrips_cusips(
     as_of_date: Optional[datetime] = None,
 ):
     historical_auctions_df = auction_df_filterer(historical_auctions_df)
-    active_df = historical_auctions_df[historical_auctions_df["maturity_date"] > as_of_date]
-    tint_cusip = "tint_cusip_1" 
+    active_df = historical_auctions_df[
+        historical_auctions_df["maturity_date"] > as_of_date
+    ]
+    tint_cusip = "tint_cusip_1"
     active_df[tint_cusip] = active_df[tint_cusip].replace("null", np.nan)
     active_df = active_df[active_df[tint_cusip].notna()]
     active_df = active_df.sort_values(by=["maturity_date"]).reset_index(drop=True)
-    return active_df[["maturity_date", tint_cusip]] 
+    return active_df[["maturity_date", tint_cusip]]
 
 
 def enhanced_plotly_blue_scale():
@@ -530,7 +543,7 @@ def enhanced_plotly_blue_scale():
         [0.18, "#0d1ebe"],  # Further lightening
         [0.20, "#0e20bf"],  # Approaching mid blues
         [0.25, "#1116e8"],  # Jumping to a lighter blue for contrast
-        [0.3, "#1910d8"],   # Original Plotly3 blue
+        [0.3, "#1910d8"],  # Original Plotly3 blue
     ]
 
     # Transitioning back to the original Plotly3 scale, starting from a point after the enhanced blue
@@ -550,5 +563,5 @@ def enhanced_plotly_blue_scale():
 
     # Combine the more granular blue scale with the rest of the Plotly3 colors
     combined_scale = enhanced_blue_scale + transition_scale
-    
+
     return combined_scale
