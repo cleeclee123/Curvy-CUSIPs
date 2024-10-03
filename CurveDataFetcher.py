@@ -3,7 +3,7 @@ import multiprocessing as mp
 import warnings
 from datetime import datetime
 from functools import partial, reduce
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Callable
 import tqdm
 import tqdm.asyncio
 
@@ -16,6 +16,7 @@ from pandas.tseries.offsets import CustomBusinessDay, BDay
 from pandas.tseries.holiday import USFederalHolidayCalendar
 from scipy.optimize import newton
 
+from CurveInterpolator import GeneralCurveInterpolator
 from DataFetcher.base import DataFetcherBase
 from DataFetcher.bondsupermart import BondSupermartDataFetcher
 from DataFetcher.fedinvest import FedInvestDataFetcher
@@ -266,21 +267,27 @@ class CurveDataFetcher:
 
         return merged_df
 
+    # max_concurrent_tasks limit applies to the logical tasks that your code wants to execute concurrently
+    #    - ensures that we don’t attempt to start too many logical fetching operations at once
+    # max_connections limit applies to the physical HTTP requests that can be made concurrently by httpx.AsyncClient
+    #    - ensures only a certain number can actually initiate network connections concurrently
+    # fitted_curves is tuple of size 3 (interp key, quote yield type, callable curve set df filter function)
     def fetch_historical_curve_sets(
         self,
         start_date: datetime,
         end_date: datetime,
-        fetch_soma_holdings=False,
-        fetch_stripping_data=False,
-        calc_free_float=False,
-        max_concurrent_tasks: int = 64,
-        max_connections: int = 64,
-    ):
+        fetch_soma_holdings: Optional[bool] = False,
+        fetch_stripping_data: Optional[bool] = False,
+        calc_free_float: Optional[bool] = False,
+        fitted_curves: Optional[List[Tuple[str, Callable]]] = None,
+        max_concurrent_tasks: Optional[int] = 128,
+        max_connections: Optional[int] = 64,
+    ) -> Tuple[Dict[datetime, pd.DataFrame], Dict[datetime, Dict[str, GeneralCurveInterpolator]]]:
         if calc_free_float:
             fetch_soma_holdings = True
             fetch_stripping_data = True
 
-        async def gather_tasks(client: httpx.AsyncClient, dates: datetime, max_concurrent_tasks: int = 64):
+        async def gather_tasks(client: httpx.AsyncClient, dates: datetime, max_concurrent_tasks):
             my_semaphore = asyncio.Semaphore(max_concurrent_tasks)
             tasks = await self.fedinvest_data_fetcher._build_fetch_tasks_cusip_prices_from_github(
                 client=client,
@@ -325,7 +332,7 @@ class CurveDataFetcher:
             # return await asyncio.gather(*tasks)
             return await tqdm.asyncio.tqdm.gather(*tasks, desc="FETCHING CURVE SETS...")
 
-        async def run_fetch_all(dates: datetime, max_concurrent_tasks: int = 64, max_connections: int = 64):
+        async def run_fetch_all(dates: datetime, max_concurrent_tasks: int, max_connections: int):
             limits = httpx.Limits(max_connections=max_connections)
             async with httpx.AsyncClient(
                 limits=limits,
@@ -363,8 +370,9 @@ class CurveDataFetcher:
         last_seen_soma_holdings_df = None
         last_seen_stripping_act_df = None
         curveset_dict_df: Dict[datetime, List[pd.DataFrame]] = {}
+        curveset_intrep_dict: Dict[datetime, Dict[str, GeneralCurveInterpolator]] = {}
 
-        for tup in tqdm.tqdm(sorted_results, desc="MERGING CURVE SET DFs"):
+        for tup in tqdm.tqdm(sorted_results, desc="AGGREGATING CURVE SET DFs"):
             curr_dt = tup[0]
             uid = tup[-1]
 
@@ -416,8 +424,29 @@ class CurveDataFetcher:
                         ((pl.col("est_outstanding_amt") - pl.col("parValue") - pl.col("portion_stripped_amt")) / 1_000_000).alias("free_float")
                     )
 
-                curveset_dict_df[curr_dt] = merged_df.to_pandas()
+                curr_curve_set_df = merged_df.to_pandas()
+                curveset_dict_df[curr_dt] = curr_curve_set_df
 
+                if fitted_curves:
+                    for curve_build_params in fitted_curves:
+                        if len(curve_build_params) == 3:
+                            if callable(curve_build_params[-1]):
+                                curve_set_key, quote_type, filter_func = curve_build_params
+
+                                curr_filtered_curve_set_df = filter_func(curr_curve_set_df)
+
+                                if curr_dt not in curveset_intrep_dict:
+                                    curveset_intrep_dict[curr_dt] = {}
+                                if curve_set_key not in curveset_intrep_dict[curr_dt]:
+                                    curveset_intrep_dict[curr_dt][curve_set_key] = {}
+
+                                curveset_intrep_dict[curr_dt][curve_set_key] = GeneralCurveInterpolator(
+                                    x=curr_filtered_curve_set_df["time_to_maturity"].to_numpy(), y=curr_filtered_curve_set_df[quote_type].to_numpy()
+                                )
+
+        if fitted_curves:
+            return curveset_dict_df, curveset_intrep_dict 
+            
         return curveset_dict_df
 
     def build_curve_set(
