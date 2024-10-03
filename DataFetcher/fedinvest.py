@@ -323,6 +323,7 @@ class FedInvestDataFetcher(DataFetcherBase):
         cusips: Optional[List[str]] = None,
         uid: Optional[str | int] = None,
         max_concurrent_tasks: int = 64,
+        my_semaphore: Optional[asyncio.Semaphore] = None,
         cols_to_return: Optional[List[str]] = [
             "cusip",
             "offer_yield",
@@ -330,7 +331,7 @@ class FedInvestDataFetcher(DataFetcherBase):
             "eod_yield",
         ],
     ):
-        semaphore = asyncio.Semaphore(max_concurrent_tasks)
+        semaphore = my_semaphore or asyncio.Semaphore(max_concurrent_tasks)
         tasks = [
             self._fetch_cusip_prices_from_github_with_semaphore(
                 semaphore,

@@ -4,6 +4,8 @@ import warnings
 from datetime import datetime
 from functools import partial, reduce
 from typing import Dict, List, Optional, Tuple
+import tqdm
+import tqdm.asyncio
 
 import time
 import httpx
@@ -271,12 +273,15 @@ class CurveDataFetcher:
         fetch_soma_holdings=False,
         fetch_stripping_data=False,
         calc_free_float=False,
+        max_concurrent_tasks: int = 64,
+        max_connections: int = 64,
     ):
         if calc_free_float:
             fetch_soma_holdings = True
             fetch_stripping_data = True
 
-        async def gather_tasks(client: httpx.AsyncClient, dates: datetime):
+        async def gather_tasks(client: httpx.AsyncClient, dates: datetime, max_concurrent_tasks: int = 64):
+            my_semaphore = asyncio.Semaphore(max_concurrent_tasks)
             tasks = await self.fedinvest_data_fetcher._build_fetch_tasks_cusip_prices_from_github(
                 client=client,
                 dates=dates,
@@ -294,6 +299,7 @@ class CurveDataFetcher:
                         "eod_yield",
                     ]
                 ),
+                my_semaphore=my_semaphore,
             )
 
             if fetch_soma_holdings:
@@ -303,6 +309,7 @@ class CurveDataFetcher:
                     dates=[soma_bwd_date.to_pydatetime()] + dates,
                     uid="soma_holdings",
                     minimize_api_calls=True,
+                    my_semaphore=my_semaphore,
                 )
 
             if fetch_stripping_data:
@@ -312,16 +319,18 @@ class CurveDataFetcher:
                     dates=[strips_bwd_date.to_pydatetime()] + dates,
                     uid="ust_stripping",
                     minimize_api_calls=True,
+                    my_semaphore=my_semaphore,
                 )
 
-            return await asyncio.gather(*tasks)
+            # return await asyncio.gather(*tasks)
+            return await tqdm.asyncio.tqdm.gather(*tasks, desc="FETCHING CURVE SETS...")
 
-        async def run_fetch_all(dates: datetime):
-            limits = httpx.Limits(max_connections=8)
+        async def run_fetch_all(dates: datetime, max_concurrent_tasks: int = 64, max_connections: int = 64):
+            limits = httpx.Limits(max_connections=max_connections)
             async with httpx.AsyncClient(
                 limits=limits,
             ) as client:
-                all_data = await gather_tasks(client=client, dates=dates)
+                all_data = await gather_tasks(client=client, dates=dates, max_concurrent_tasks=max_concurrent_tasks)
                 return all_data
 
         bdates = [
@@ -333,12 +342,11 @@ class CurveDataFetcher:
             )
         ]
 
-        t1 = time.time()
-        results: List[Tuple[datetime, pd.DataFrame, str]] = asyncio.run(run_fetch_all(dates=bdates))
+        results: List[Tuple[datetime, pd.DataFrame, str]] = asyncio.run(
+            run_fetch_all(dates=bdates, max_concurrent_tasks=max_concurrent_tasks, max_connections=max_connections)
+        )
         sorted_results = sorted(results, key=lambda x: x[0])
-        print(f"DATA FETCHING TOOK: {time.time() - t1} secs")
 
-        t1 = time.time()
         auctions_df: pl.DataFrame = pl.from_pandas(self.ust_data_fetcher._historical_auctions_df.copy())
         auctions_df = auctions_df.filter(
             (pl.col("security_type") == "Bill") | (pl.col("security_type") == "Note") | (pl.col("security_type") == "Bond")
@@ -351,14 +359,12 @@ class CurveDataFetcher:
             .otherwise(pl.col("original_security_term"))
             .alias("original_security_term")
         )
-        print(f"AUCTIONS DF PREP TOOK: {time.time() - t1} secs")
 
         last_seen_soma_holdings_df = None
         last_seen_stripping_act_df = None
         curveset_dict_df: Dict[datetime, List[pd.DataFrame]] = {}
 
-        t1 = time.time()
-        for tup in sorted_results:
+        for tup in tqdm.tqdm(sorted_results, desc="MERGING CURVE SET DFs"):
             curr_dt = tup[0]
             uid = tup[-1]
 
@@ -397,13 +403,21 @@ class CurveDataFetcher:
                     merged_df = merged_df.with_columns(
                         pl.col("parValue").cast(pl.Float64).fill_null(0).alias("parValue"),
                         (pl.col("portion_stripped_amt").cast(pl.Float64).fill_null(0) * 1000).alias("portion_stripped_amt"),
-                        (pl.col("est_outstanding_amt").cast(pl.Float64).fill_null(0) * 1000).alias("est_outstanding_amt"),
-                        ((pl.col("est_outstanding_amt") - pl.col("parValue") - pl.col("portion_stripped_amt")) / 1_000_000).alias("free_float"),
+                        (
+                            pl.when((pl.col("est_outstanding_amt").is_not_nan()) & (pl.col("est_outstanding_amt") != 0))
+                            .then(pl.col("est_outstanding_amt"))
+                            .otherwise(pl.col("outstanding_amt"))
+                            .cast(pl.Float64)
+                            .fill_null(0)
+                            * 1000
+                        ).alias("est_outstanding_amt"),
+                    )
+                    merged_df = merged_df.with_columns(
+                        ((pl.col("est_outstanding_amt") - pl.col("parValue") - pl.col("portion_stripped_amt")) / 1_000_000).alias("free_float")
                     )
 
                 curveset_dict_df[curr_dt] = merged_df.to_pandas()
 
-        print(f"DF AGG TOOK: {time.time() - t1} secs")
         return curveset_dict_df
 
     def build_curve_set(

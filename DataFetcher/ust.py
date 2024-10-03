@@ -191,15 +191,15 @@ class USTreasuryDataFetcher(DataFetcherBase):
                         if uid:
                             return json_data["data"], uid
                         return json_data["data"]
-                    
+
                     except httpx.HTTPStatusError as e:
                         self._logger.error(f"UST AUCTIONS - Bad Status: {response.status_code}")
-                        
+
                         # UST's website is very weird sometimes - maybe getting throttled?
                         # if response.status_code == 404:
                         #     if uid:
                         #         return pd.DataFrame(columns=historical_auction_cols()), uid
-                        #     return pd.DataFrame(columns=historical_auction_cols()) 
+                        #     return pd.DataFrame(columns=historical_auction_cols())
 
                         retries += 1
                         wait_time = backoff_factor * (2 ** (retries - 1))
@@ -214,24 +214,16 @@ class USTreasuryDataFetcher(DataFetcherBase):
                         await asyncio.sleep(wait_time)
 
                 raise ValueError(f"UST AUCTIONS Activity - Max retries exceeded")
-            
+
             except Exception as e:
                 self._logger.error(e)
                 raise e
                 # if uid:
                 #     return pd.DataFrame(columns=historical_auction_cols()), uid
-                # return pd.DataFrame(columns=historical_auction_cols()) 
+                # return pd.DataFrame(columns=historical_auction_cols())
 
         tasks = [
-            fetch(
-                client=client,
-                url=url,
-                as_of_date=as_of_date,
-                return_df=return_df,
-                uid=uid,
-                max_retries=max_retries,
-                backoff_factor=backoff_factor
-            )
+            fetch(client=client, url=url, as_of_date=as_of_date, return_df=return_df, uid=uid, max_retries=max_retries, backoff_factor=backoff_factor)
             for url in links
         ]
         return tasks
@@ -331,6 +323,96 @@ class USTreasuryDataFetcher(DataFetcherBase):
 
         return df_par_rates
 
+    async def _fetch_mspd_table_5(
+        self,
+        client: httpx.AsyncClient,
+        date: datetime,
+        uid: Optional[str | int] = None,
+        max_retries: Optional[int] = 3,
+        backoff_factor: Optional[int] = 1,
+    ):
+        cols_to_return = [
+            "cusip",
+            "corpus_cusip",
+            "outstanding_amt",  # not using this col since not all USTs have stripping activity - using MSPD table 3 for "outstanding_amt"
+            "portion_unstripped_amt",
+            "portion_stripped_amt",
+            "reconstituted_amt",
+        ]
+        retries = 0
+        try:
+            while retries < max_retries:
+                try:
+                    last_n_months_last_business_days: List[datetime] = last_day_n_months_ago(date, n=2, return_all=True)
+                    self._logger.debug(f"STRIPping - BDays: {last_n_months_last_business_days}")
+                    dates_str_query = ",".join([date.strftime("%Y-%m-%d") for date in last_n_months_last_business_days])
+                    url = f"https://api.fiscaldata.treasury.gov/services/api/fiscal_service/v1/debt/mspd/mspd_table_5?filter=record_date:in:({dates_str_query})&page[number]=1&page[size]=10000"
+                    self._logger.debug(f"STRIPping - {date} url: {url}")
+                    response = await client.get(
+                        url,
+                        headers=build_treasurydirect_header(host_str="api.fiscaldata.treasury.gov"),
+                    )
+                    response.raise_for_status()
+                    curr_stripping_activity_json = response.json()
+                    curr_stripping_activity_df = pd.DataFrame(curr_stripping_activity_json["data"])
+                    curr_stripping_activity_df = curr_stripping_activity_df[
+                        curr_stripping_activity_df["security_class1_desc"] != "Treasury Inflation-Protected Securities"
+                    ]
+                    curr_stripping_activity_df["record_date"] = pd.to_datetime(curr_stripping_activity_df["record_date"], errors="coerce")
+                    latest_date = curr_stripping_activity_df["record_date"].max()
+                    curr_stripping_activity_df = curr_stripping_activity_df[curr_stripping_activity_df["record_date"] == latest_date]
+                    curr_stripping_activity_df["outstanding_amt"] = pd.to_numeric(curr_stripping_activity_df["outstanding_amt"], errors="coerce")
+                    curr_stripping_activity_df["portion_unstripped_amt"] = pd.to_numeric(
+                        curr_stripping_activity_df["portion_unstripped_amt"],
+                        errors="coerce",
+                    )
+                    curr_stripping_activity_df["portion_stripped_amt"] = pd.to_numeric(
+                        curr_stripping_activity_df["portion_stripped_amt"], errors="coerce"
+                    )
+                    curr_stripping_activity_df["reconstituted_amt"] = pd.to_numeric(curr_stripping_activity_df["reconstituted_amt"], errors="coerce")
+                    col1 = "cusip"
+                    col2 = "security_class2_desc"
+                    curr_stripping_activity_df.columns = [
+                        col2 if col == col1 else col1 if col == col2 else col for col in curr_stripping_activity_df.columns
+                    ]
+                    curr_stripping_activity_df = curr_stripping_activity_df.rename(columns={"security_class2_desc": "corpus_cusip"})
+
+                    if uid:
+                        return date, curr_stripping_activity_df[cols_to_return], uid
+
+                    return date, curr_stripping_activity_df[cols_to_return]
+
+                except httpx.HTTPStatusError as e:
+                    self._logger.error(f"STRIPping - Bad Status: {response.status_code}")
+                    if response.status_code == 404:
+                        if uid:
+                            return date, pd.DataFrame(columns=cols_to_return), uid
+                        return date, pd.DataFrame(columns=cols_to_return)
+
+                    retries += 1
+                    wait_time = backoff_factor * (2 ** (retries - 1))
+                    self._logger.debug(f"UST STRIPPING Activity - Throttled. Waiting for {wait_time} seconds before retrying...")
+                    await asyncio.sleep(wait_time)
+
+                except Exception as e:
+                    self._logger.error(f"UST STRIPPING Activity - Error for {date}: {e}")
+                    retries += 1
+                    wait_time = backoff_factor * (2 ** (retries - 1))
+                    self._logger.debug(f"UST STRIPPING Activity - Throttled. Waiting for {wait_time} seconds before retrying...")
+                    await asyncio.sleep(wait_time)
+
+            raise ValueError(f"UST STRIPPING Activity - Max retries exceeded for {date}")
+
+        except Exception as e:
+            self._logger.error(e)
+            if uid:
+                return date, pd.DataFrame(columns=cols_to_return), uid
+            return date, pd.DataFrame(columns=cols_to_return)
+
+    async def _fetch_mspd_table_5_with_semaphore(self, semaphore, *args, **kwargs):
+        async with semaphore:
+            return await self._fetch_mspd_table_5(*args, **kwargs)
+
     async def _build_fetch_tasks_historical_stripping_activity(
         self,
         client: httpx.AsyncClient,
@@ -339,91 +421,11 @@ class USTreasuryDataFetcher(DataFetcherBase):
         minimize_api_calls=False,
         max_retries: Optional[int] = 3,
         backoff_factor: Optional[int] = 1,
+        max_concurrent_tasks: int = 64,
+        my_semaphore: Optional[asyncio.Semaphore] = None,
     ):
-        async def fetch_mspd_table_5(
-            client: httpx.AsyncClient,
-            date: datetime,
-            uid: Optional[str | int] = None,
-        ):
-            cols_to_return = [
-                "cusip",
-                "corpus_cusip",
-                "outstanding_amt",  # not using this col since not all USTs have stripping activity - using MSPD table 3 for "outstanding_amt"
-                "portion_unstripped_amt",
-                "portion_stripped_amt",
-                "reconstituted_amt",
-            ]
-            retries = 0
-            try:
-                while retries < max_retries:
-                    try:
-                        last_n_months_last_business_days: List[datetime] = last_day_n_months_ago(date, n=2, return_all=True)
-                        self._logger.debug(f"STRIPping - BDays: {last_n_months_last_business_days}")
-                        dates_str_query = ",".join([date.strftime("%Y-%m-%d") for date in last_n_months_last_business_days])
-                        url = f"https://api.fiscaldata.treasury.gov/services/api/fiscal_service/v1/debt/mspd/mspd_table_5?filter=record_date:in:({dates_str_query})&page[number]=1&page[size]=10000"
-                        self._logger.debug(f"STRIPping - {date} url: {url}")
-                        response = await client.get(
-                            url,
-                            headers=build_treasurydirect_header(host_str="api.fiscaldata.treasury.gov"),
-                        )
-                        response.raise_for_status()
-                        curr_stripping_activity_json = response.json()
-                        curr_stripping_activity_df = pd.DataFrame(curr_stripping_activity_json["data"])
-                        curr_stripping_activity_df = curr_stripping_activity_df[
-                            curr_stripping_activity_df["security_class1_desc"] != "Treasury Inflation-Protected Securities"
-                        ]
-                        curr_stripping_activity_df["record_date"] = pd.to_datetime(curr_stripping_activity_df["record_date"], errors="coerce")
-                        latest_date = curr_stripping_activity_df["record_date"].max()
-                        curr_stripping_activity_df = curr_stripping_activity_df[curr_stripping_activity_df["record_date"] == latest_date]
-                        curr_stripping_activity_df["outstanding_amt"] = pd.to_numeric(curr_stripping_activity_df["outstanding_amt"], errors="coerce")
-                        curr_stripping_activity_df["portion_unstripped_amt"] = pd.to_numeric(
-                            curr_stripping_activity_df["portion_unstripped_amt"],
-                            errors="coerce",
-                        )
-                        curr_stripping_activity_df["portion_stripped_amt"] = pd.to_numeric(
-                            curr_stripping_activity_df["portion_stripped_amt"], errors="coerce"
-                        )
-                        curr_stripping_activity_df["reconstituted_amt"] = pd.to_numeric(
-                            curr_stripping_activity_df["reconstituted_amt"], errors="coerce"
-                        )
-                        col1 = "cusip"
-                        col2 = "security_class2_desc"
-                        curr_stripping_activity_df.columns = [
-                            col2 if col == col1 else col1 if col == col2 else col for col in curr_stripping_activity_df.columns
-                        ]
-                        curr_stripping_activity_df = curr_stripping_activity_df.rename(columns={"security_class2_desc": "corpus_cusip"})
 
-                        if uid:
-                            return date, curr_stripping_activity_df[cols_to_return], uid
-
-                        return date, curr_stripping_activity_df[cols_to_return]
-
-                    except httpx.HTTPStatusError as e:
-                        self._logger.error(f"STRIPping - Bad Status: {response.status_code}")
-                        if response.status_code == 404:
-                            if uid:
-                                return date, pd.DataFrame(columns=cols_to_return), uid
-                            return date, pd.DataFrame(columns=cols_to_return)
-
-                        retries += 1
-                        wait_time = backoff_factor * (2 ** (retries - 1))
-                        self._logger.debug(f"UST STRIPPING Activity - Throttled. Waiting for {wait_time} seconds before retrying...")
-                        await asyncio.sleep(wait_time)
-
-                    except Exception as e:
-                        self._logger.error(f"UST STRIPPING Activity - Error for {date}: {e}")
-                        retries += 1
-                        wait_time = backoff_factor * (2 ** (retries - 1))
-                        self._logger.debug(f"UST STRIPPING Activity - Throttled. Waiting for {wait_time} seconds before retrying...")
-                        await asyncio.sleep(wait_time)
-
-                raise ValueError(f"UST STRIPPING Activity - Max retries exceeded for {date}")
-
-            except Exception as e:
-                self._logger.error(e)
-                if uid:
-                    return date, pd.DataFrame(columns=cols_to_return), uid
-                return date, pd.DataFrame(columns=cols_to_return)
+        semaphore = my_semaphore or asyncio.Semaphore(max_concurrent_tasks)
 
         if minimize_api_calls:
             seen_month_years = set()
@@ -434,9 +436,19 @@ class USTreasuryDataFetcher(DataFetcherBase):
                     seen_month_years.add(month_year)
                     filtered_list.append(date)
 
-            tasks = [fetch_mspd_table_5(client=client, date=date, uid=uid) for date in filtered_list]
+            tasks = [
+                self._fetch_mspd_table_5_with_semaphore(
+                    client=client, date=date, semaphore=semaphore, uid=uid, max_retries=max_retries, backoff_factor=backoff_factor
+                )
+                for date in filtered_list
+            ]
             return tasks
 
         else:
-            tasks = [fetch_mspd_table_5(client=client, date=date, uid=uid) for date in dates]
+            tasks = [
+                self._fetch_mspd_table_5_with_semaphore(
+                    client=client, date=date, semaphore=semaphore, uid=uid, max_retries=max_retries, backoff_factor=backoff_factor
+                )
+                for date in dates
+            ]
             return tasks
