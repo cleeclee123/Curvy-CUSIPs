@@ -63,12 +63,14 @@ class YahooFinanceDataFetcher(DataFetcherBase):
         from_date: datetime,
         to_date: datetime,
         raw_path: Optional[str] = None,
+        ny_time=False
     ):
         return download_historical_data_yahoofinance(
             ticker=ticker,
             from_date=from_date,
             to_date=to_date,
             raw_path=raw_path,
+            ny_time=ny_time
         )
 
     async def _fetch_cusip_timeseries_yahoofinance(

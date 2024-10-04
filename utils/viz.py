@@ -6,7 +6,7 @@ import pandas as pd
 import numpy as np
 from scipy.optimize import newton
 from scipy.interpolate import UnivariateSpline
-from scipy.stats import zscore
+from scipy.stats import zscore, tstd
 import plotly.express as px
 import plotly.graph_objs as go
 import seaborn as sns
@@ -214,6 +214,7 @@ def run_basic_linear_regression_df(df: pd.DataFrame, x_col: str, y_col: str, tit
     slope = results.params[1]
     r_squared = results.rsquared
     p_value = results.pvalues[1] if len(results.pvalues) > 1 else None
+    slope_name = results.params.drop('const').index[0]
 
     plt.figure(figsize=(20, 10))
     plt.scatter(df[x_col], df[y_col])
@@ -232,7 +233,7 @@ def run_basic_linear_regression_df(df: pd.DataFrame, x_col: str, y_col: str, tit
     plt.xlabel(x_col)
     plt.ylabel(y_col)
     plt.title(title or f"{y_col} Regressed on {x_col}", fontdict={"fontsize": "x-large"})
-    equation_text = f"y = {intercept:.3f} + {slope:.3f}x\nR² = {r_squared:.3f}\nSE = {results.bse["const"]:.3f}\np-value (x) = {p_value:.3e}"
+    equation_text = f"y = {intercept:.3f} + {slope:.3f}*{slope_name}\nR² = {r_squared:.3f}\nSE = {results.bse["const"]:.3f}\np-value ({slope_name}) = {p_value:.3e}"
     plt.plot([], [], " ", label=f"{equation_text}")
     plt.legend(fontsize="x-large")
     plt.grid(True)
@@ -241,12 +242,75 @@ def run_basic_linear_regression_df(df: pd.DataFrame, x_col: str, y_col: str, tit
     return results
 
 
+def run_multiple_linear_regression_df(
+    df: pd.DataFrame, x_cols: List[str], y_col: str, title: Optional[str] = None, verbose=False
+):
+    df = df[x_cols + [y_col]].copy()
+    df = df.dropna()
+    
+    if verbose:  
+        print(df)
+    
+    for col in x_cols + [y_col]:
+        if col not in df.columns:
+            raise Exception(f"{col} not in df columns")
+
+    Y = df[y_col]
+    X = df[x_cols]
+    X = sm.add_constant(X)  
+
+    model = sm.OLS(Y, X)
+    results = model.fit()
+    print(results.summary())
+
+    intercept = results.params['const']
+    slopes = results.params.drop('const')
+    r_squared = results.rsquared
+    adj_r_squared = results.rsquared_adj
+
+    Y_pred = results.fittedvalues
+    residuals = results.resid
+    
+    plt.figure(figsize=(20, 10))
+    plt.scatter(Y_pred, Y)
+    plt.xlabel('Predicted Values')
+    plt.ylabel('Actual Values')
+    plt.title('Actual vs Predicted')
+    plt.grid(True)
+
+    equation_text = f"y = {intercept:.3f}"
+    for col in slopes.index:
+        coef = slopes[col]
+        equation_text += f" + {coef:.3f}*{col}"
+    equation_text += f"\nR² = {r_squared:.3f}\nAdjusted R² = {adj_r_squared:.3f}"
+    plt.plot([], [], ' ', label=equation_text)
+    plt.legend(fontsize='x-large')
+    plt.show()
+
+    # Plot Residuals vs Predicted
+    plt.figure(figsize=(20, 10))
+    plt.scatter(Y_pred, residuals)
+    plt.axhline(y=0, color='red', linestyle='--')
+    plt.xlabel('Predicted Values')
+    plt.ylabel('Residuals')
+    plt.title('Residuals vs Predicted')
+    plt.grid(True)
+    plt.show()
+
+    return results 
+
+
 def plot_residuals_timeseries(
-    df: pd.DataFrame, results: sm.regression.linear_model.RegressionResultsWrapper, date_col: str = "Date", plot_zscores: Optional[bool] = False
+    df: pd.DataFrame,
+    results: sm.regression.linear_model.RegressionResultsWrapper,
+    date_col: str = "Date",
+    plot_zscores: Optional[bool] = False,
+    stds: Optional[List[int]] = None,
+    rolling_stds: Optional[List[Tuple[int, int]]] = None,
 ):
     residuals = results.resid
     zscores = zscore(residuals)
-    
+
     if date_col not in df.columns:
         raise Exception(f"{date_col} not in df columns")
 
@@ -256,6 +320,7 @@ def plot_residuals_timeseries(
     p_value = results.pvalues[1] if len(results.pvalues) > 1 else None
     dependent_variable = results.model.endog_names
     independent_variables = results.model.exog_names[1]
+    slope_name = results.params.drop('const').index[0]
 
     if p_value is not None:
         title = f"Residuals of {dependent_variable} Regressed on {independent_variables} Over Time\n"
@@ -265,8 +330,21 @@ def plot_residuals_timeseries(
     plt.figure(figsize=(20, 10))
     plt.plot(df[date_col], residuals if not plot_zscores else zscores, linestyle="-", color="blue")
     plt.axhline(y=0, color="red", linestyle="--")
-    equation_text = f"y = {intercept:.3f} + {slope:.3f}x\nR² = {r_squared:.3f}\nSE = {results.bse["const"]:.3f}\np-value (x) = {p_value:.3e}"
+    equation_text = f"y = {intercept:.3f} + {slope:.3f}*{slope_name}\nR² = {r_squared:.3f}\nSE = {results.bse["const"]:.3f}\np-value ({slope_name}) = {p_value:.3e}"
     plt.plot([], [], " ", label=f"{equation_text}")
+    
+    if stds:
+        resid_std = tstd(residuals) 
+        for std in stds:
+            curr = plt.axhline(resid_std * std, linestyle="--", label=f"+/- {std} STD")
+            plt.axhline(resid_std * -1 * std, linestyle="--", color=curr.get_color())
+    
+    if rolling_stds:
+        for std, window in rolling_stds:
+            rolling_resid_std = pd.Series(residuals).rolling(window).std()
+            curr = plt.plot(df[date_col], rolling_resid_std * std, linestyle="--", label=f"+/- {std} {window}d Rolling STD")
+            plt.plot(df[date_col], -rolling_resid_std * std, linestyle="--", color=curr[0].get_color())
+    
     plt.legend(fontsize="x-large")
     plt.xlabel("Date")
     plt.ylabel("Residuals" if not plot_zscores else "Z-Scores")
@@ -274,6 +352,57 @@ def plot_residuals_timeseries(
     plt.grid(True)
     plt.show()
 
+    
+def plot_mr_residuals_timeseries(
+    df: pd.DataFrame,
+    results: sm.regression.linear_model.RegressionResultsWrapper,
+    date_col: str = "Date",
+    plot_zscores: Optional[bool] = False,
+):
+    df = df.copy()
+    df = df.dropna() 
+    
+    if date_col not in df.columns:
+        raise Exception(f"{date_col} not in df columns")
+
+    residuals = results.resid
+    if plot_zscores:
+        residuals = zscore(residuals)
+
+    r_squared = results.rsquared
+    adj_r_squared = results.rsquared_adj
+    intercept = results.params['const']
+    slopes = results.params.drop('const')
+    p_values = results.pvalues
+    dependent_variable = results.model.endog_names
+    independent_variables = results.model.exog_names[1:]  # Exclude 'const'
+
+    # Build equation text
+    equation_text = f"y = {intercept:.3f}"
+    for var in slopes.index:
+        coef = slopes[var]
+        equation_text += f" + {coef:.3f}*{var}"
+    equation_text += f"\nR² = {r_squared:.3f}\nAdjusted R² = {adj_r_squared:.3f}"
+
+    # Append p-values
+    for var in slopes.index:
+        p_val = p_values[var]
+        equation_text += f"\np-value ({var}) = {p_val:.3e}"
+
+    # Title
+    title = f"Residuals of {dependent_variable} Regressed on {', '.join(independent_variables)} Over Time"
+
+    plt.figure(figsize=(20, 10))
+    plt.plot(df[date_col], residuals, linestyle="-", color="blue")
+    plt.axhline(y=0, color="red", linestyle="--")
+    plt.plot([], [], " ", label=equation_text)
+    plt.legend(fontsize="x-large")
+    plt.xlabel("Date")
+    plt.ylabel("Z-Scores" if plot_zscores else "Residuals")
+    plt.title(title + (", Z-Scores" if plot_zscores else ""), fontdict={"fontsize": "x-large"})
+    plt.grid(True)
+    plt.show()
+    
 
 def par_curve_func(tenor, zero_curve_func, is_parametric_class=False):
     if is_parametric_class:

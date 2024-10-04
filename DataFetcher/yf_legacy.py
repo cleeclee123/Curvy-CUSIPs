@@ -73,6 +73,7 @@ def download_historical_data_yahoofinance(
     from_date: datetime,
     to_date: datetime,
     raw_path: str = None,
+    ny_time=False
 ):
     from_sec = round(from_date.timestamp())
     to_sec = round(to_date.timestamp())
@@ -109,7 +110,11 @@ def download_historical_data_yahoofinance(
             }
         )
         df["Date"] = pd.to_datetime(df["Date"], utc=True, unit="s")
-        df["Date"] = df["Date"].dt.tz_convert("America/New_York")
+        if ny_time:
+            df["Date"] = df["Date"].dt.tz_convert("America/New_York")
+        else: 
+            df["Date"] = df["Date"].dt.date
+        
         if raw_path:
             df.to_excel(raw_path)
         return df
