@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 from scipy.optimize import newton
 from scipy.interpolate import UnivariateSpline
+from scipy.stats import zscore
 import plotly.express as px
 import plotly.graph_objs as go
 import seaborn as sns
@@ -38,35 +39,22 @@ def plot_yields(
     copy_df = df.copy()
     copy_df["Date"] = pd.to_datetime(copy_df["Date"])
     if date_subset_range:
-        copy_df = copy_df[
-            (copy_df["Date"] >= date_subset_range[0])
-            & (copy_df["Date"] <= date_subset_range[1])
-        ]
+        copy_df = copy_df[(copy_df["Date"] >= date_subset_range[0]) & (copy_df["Date"] <= date_subset_range[1])]
     if flip:
         copy_df = copy_df.iloc[::-1]
 
     fig = go.Figure()
     for y_col in y_cols:
         if bar_plot:
-            fig.add_trace(
-                go.Bar(
-                    x=copy_df[x_col], y=copy_df[y_col], name=y_col, marker_color="black"
-                )
-            )
+            fig.add_trace(go.Bar(x=copy_df[x_col], y=copy_df[y_col], name=y_col, marker_color="black"))
         else:
-            fig.add_trace(
-                go.Scatter(x=copy_df[x_col], y=copy_df[y_col], mode="lines", name=y_col)
-            )
+            fig.add_trace(go.Scatter(x=copy_df[x_col], y=copy_df[y_col], mode="lines", name=y_col))
 
     if recessions:
         if date_subset_range:
-            start_plot_range, end_plot_range = min(date_subset_range), max(
-                date_subset_range
-            )
+            start_plot_range, end_plot_range = min(date_subset_range), max(date_subset_range)
         else:
-            start_plot_range, end_plot_range = min(copy_df["Date"]), max(
-                copy_df["Date"]
-            )
+            start_plot_range, end_plot_range = min(copy_df["Date"]), max(copy_df["Date"])
 
         for recession_dates in recessions:
             start_date, end_date = recession_dates
@@ -89,12 +77,8 @@ def plot_yields(
         template="plotly_dark",
         height=700,
     )
-    fig.update_xaxes(
-        showspikes=True, spikecolor="white", spikesnap="cursor", spikemode="across"
-    )
-    fig.update_yaxes(
-        showspikes=True, spikecolor="white", spikesnap="cursor", spikethickness=0.5
-    )
+    fig.update_xaxes(showspikes=True, spikecolor="white", spikesnap="cursor", spikemode="across")
+    fig.update_yaxes(showspikes=True, spikecolor="white", spikesnap="cursor", spikethickness=0.5)
     fig.show(
         config={
             "modeBarButtonsToAdd": [
@@ -168,12 +152,8 @@ def plot_yield_curve_date_range(
         height=700,
         template="plotly_dark",
     )
-    fig.update_xaxes(
-        showspikes=True, spikecolor="white", spikesnap="cursor", spikemode="across"
-    )
-    fig.update_yaxes(
-        showspikes=True, spikecolor="white", spikesnap="cursor", spikethickness=0.5
-    )
+    fig.update_xaxes(showspikes=True, spikecolor="white", spikesnap="cursor", spikemode="across")
+    fig.update_yaxes(showspikes=True, spikecolor="white", spikesnap="cursor", spikethickness=0.5)
     fig.show(
         config={
             "modeBarButtonsToAdd": [
@@ -188,9 +168,38 @@ def plot_yield_curve_date_range(
     )
 
 
-def run_basic_linear_regression(
-    df: pd.DataFrame, x_col: str, y_col: str, title: Optional[str] = None
-):
+def run_basic_linear_regression(x_series: pd.Series, y_series: pd.Series, x_label, y_label, title: Optional[str] = None):
+    Y = y_series
+    X = x_series
+    X = sm.add_constant(X)
+    model = sm.OLS(Y, X)
+    results = model.fit()
+    print(results.summary())
+
+    intercept = results.params[0]
+    slope = results.params[1]
+    r_squared = results.rsquared
+
+    plt.figure(figsize=(20, 10))
+    plt.scatter(x_series, y_series)
+
+    regression_line = intercept + slope * x_series
+    plt.plot(x_series, regression_line, color="red")
+
+    plt.ylabel(x_label)
+    plt.xlabel(y_label)
+    plt.title(title or f"{y_label} Regressed on {x_label}")
+    equation_text = f"y = {intercept:.3f} + {slope:.3f}x \n R² = {r_squared:.3f} \n SE = {results.bse["const"]:.3f}"
+    plt.plot([], [], " ", label=f"{equation_text}")
+
+    plt.legend(fontsize="x-large")
+    plt.grid(True)
+    plt.show()
+
+    return results
+
+
+def run_basic_linear_regression_df(df: pd.DataFrame, x_col: str, y_col: str, title: Optional[str] = None):
     if x_col not in df.columns or y_col not in df.columns:
         raise Exception(f"{x_col} or {y_col} not in df cols")
 
@@ -204,6 +213,7 @@ def run_basic_linear_regression(
     intercept = results.params[0]
     slope = results.params[1]
     r_squared = results.rsquared
+    p_value = results.pvalues[1] if len(results.pvalues) > 1 else None
 
     plt.figure(figsize=(20, 10))
     plt.scatter(df[x_col], df[y_col])
@@ -221,11 +231,46 @@ def run_basic_linear_regression(
 
     plt.xlabel(x_col)
     plt.ylabel(y_col)
-    plt.title(title or f"{y_col} Regressed on {x_col}")
-    equation_text = f"y = {intercept:.3f} + {slope:.3f}x \n R² = {r_squared:.3f} \n SE = {results.bse["const"]:.3f}"
+    plt.title(title or f"{y_col} Regressed on {x_col}", fontdict={"fontsize": "x-large"})
+    equation_text = f"y = {intercept:.3f} + {slope:.3f}x\nR² = {r_squared:.3f}\nSE = {results.bse["const"]:.3f}\np-value (x) = {p_value:.3e}"
     plt.plot([], [], " ", label=f"{equation_text}")
-
     plt.legend(fontsize="x-large")
+    plt.grid(True)
+    plt.show()
+
+    return results
+
+
+def plot_residuals_timeseries(
+    df: pd.DataFrame, results: sm.regression.linear_model.RegressionResultsWrapper, date_col: str = "Date", plot_zscores: Optional[bool] = False
+):
+    residuals = results.resid
+    zscores = zscore(residuals)
+    
+    if date_col not in df.columns:
+        raise Exception(f"{date_col} not in df columns")
+
+    r_squared = results.rsquared
+    intercept = results.params[0]
+    slope = results.params[1]
+    p_value = results.pvalues[1] if len(results.pvalues) > 1 else None
+    dependent_variable = results.model.endog_names
+    independent_variables = results.model.exog_names[1]
+
+    if p_value is not None:
+        title = f"Residuals of {dependent_variable} Regressed on {independent_variables} Over Time\n"
+    else:
+        title = f"Residuals of {dependent_variable} Regressed on {independent_variables} Over Time\n"
+
+    plt.figure(figsize=(20, 10))
+    plt.plot(df[date_col], residuals if not plot_zscores else zscores, linestyle="-", color="blue")
+    plt.axhline(y=0, color="red", linestyle="--")
+    equation_text = f"y = {intercept:.3f} + {slope:.3f}x\nR² = {r_squared:.3f}\nSE = {results.bse["const"]:.3f}\np-value (x) = {p_value:.3e}"
+    plt.plot([], [], " ", label=f"{equation_text}")
+    plt.legend(fontsize="x-large")
+    plt.xlabel("Date")
+    plt.ylabel("Residuals" if not plot_zscores else "Z-Scores")
+    plt.title(title + ", Z-Scroes" if plot_zscores else title, fontdict={"fontsize": "x-large"})
     plt.grid(True)
     plt.show()
 
@@ -234,22 +279,14 @@ def par_curve_func(tenor, zero_curve_func, is_parametric_class=False):
     if is_parametric_class:
 
         def par_bond_equation(c, maturity, zero_curve_func):
-            discounted_cash_flows = sum(
-                (c / 2) * np.exp(-(zero_curve_func([t])[0] / 100) * t)
-                for t in np.arange(0.5, maturity + 0.5, 0.5)
-            )
-            final_payment = 100 * np.exp(
-                -(zero_curve_func([maturity])[0] / 100) * maturity
-            )
+            discounted_cash_flows = sum((c / 2) * np.exp(-(zero_curve_func([t])[0] / 100) * t) for t in np.arange(0.5, maturity + 0.5, 0.5))
+            final_payment = 100 * np.exp(-(zero_curve_func([maturity])[0] / 100) * maturity)
             return discounted_cash_flows + final_payment - 100
 
     else:
 
         def par_bond_equation(c, maturity, zero_curve_func):
-            discounted_cash_flows = sum(
-                (c / 2) * np.exp(-(zero_curve_func(t) / 100) * t)
-                for t in np.arange(0.5, maturity + 0.5, 0.5)
-            )
+            discounted_cash_flows = sum((c / 2) * np.exp(-(zero_curve_func(t) / 100) * t) for t in np.arange(0.5, maturity + 0.5, 0.5))
             final_payment = 100 * np.exp(-(zero_curve_func(maturity) / 100) * maturity)
             return discounted_cash_flows + final_payment - 100
 
@@ -313,9 +350,7 @@ def plot_usts(
         hover_data=hover_data,
     )
 
-    curve_set_df.loc[otr_mask, label_col] = curve_set_df.loc[otr_mask, label_col].apply(
-        lambda x: f"OTR - {x}"
-    )
+    curve_set_df.loc[otr_mask, label_col] = curve_set_df.loc[otr_mask, label_col].apply(lambda x: f"OTR - {x}")
     otr_fig = px.scatter(
         curve_set_df[otr_mask],
         x=ttm_col,
@@ -403,9 +438,7 @@ def plot_usts(
                     )
                 fig.add_traces(ust_labels_highlight_fig.data)
         else:
-            ust_labels_highlight_mask = curve_set_df["ust_label"].isin(
-                ust_labels_highlighter
-            )
+            ust_labels_highlight_mask = curve_set_df["ust_label"].isin(ust_labels_highlighter)
             ust_labels_highlight_fig = px.scatter(
                 curve_set_df[ust_labels_highlight_mask],
                 x=ttm_col,
@@ -443,9 +476,7 @@ def plot_usts(
             fig.add_trace(
                 go.Scatter(
                     x=cfs,
-                    y=[
-                        par_curve_func(t, interp_func, is_parametric_class) for t in cfs
-                    ],
+                    y=[par_curve_func(t, interp_func, is_parametric_class) for t in cfs],
                     mode="lines",
                     name=label,
                 )
@@ -471,9 +502,7 @@ def plot_usts(
                         )
                     )
                 except Exception as e:
-                    print(
-                        "only scipy interpolation function are supported for inst fwds"
-                    )
+                    print("only scipy interpolation function are supported for inst fwds")
                     print(e)
             else:
                 forward_rates = []
@@ -543,18 +572,11 @@ def plot_usts(
                     else:
                         implied_spot_rates_n_fwd.append(np.nan)
             implied_spot_rates_n_fwd = np.array(implied_spot_rates_n_fwd)[n * 2 :]
-            implied_par_rates_n_fwd_spline = UnivariateSpline(
-                cfs[n * 2 :], implied_spot_rates_n_fwd, s=0, k=3
-            )
+            implied_par_rates_n_fwd_spline = UnivariateSpline(cfs[n * 2 :], implied_spot_rates_n_fwd, s=0, k=3)
             fig.add_trace(
                 go.Scatter(
                     x=cfs[n * 2 :],
-                    y=[
-                        par_curve_func(
-                            t, implied_par_rates_n_fwd_spline, is_parametric_class
-                        )
-                        for t in cfs[n * 2 :]
-                    ],
+                    y=[par_curve_func(t, implied_par_rates_n_fwd_spline, is_parametric_class) for t in cfs[n * 2 :]],
                     mode="lines",
                     name=label,
                 )
@@ -568,9 +590,7 @@ def plot_usts(
         template="plotly_dark",
         height=plot_height,
     )
-    fig.update_xaxes(
-        showspikes=True, spikecolor="white", spikesnap="cursor", spikemode="across"
-    )
+    fig.update_xaxes(showspikes=True, spikecolor="white", spikesnap="cursor", spikemode="across")
     fig.update_yaxes(
         showspikes=True,
         spikecolor="white",

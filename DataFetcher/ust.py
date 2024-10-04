@@ -121,7 +121,7 @@ class USTreasuryDataFetcher(DataFetcherBase):
         uid: Optional[str | int] = None,
         return_df: Optional[bool] = False,
         as_of_date: Optional[datetime] = None,  # active cusips as of
-        max_retries: Optional[int] = 3,
+        max_retries: Optional[int] = 5,
         backoff_factor: Optional[int] = 1,
     ):
         MAX_TREASURY_GOV_API_CONTENT_SIZE = 10000
