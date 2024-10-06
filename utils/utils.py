@@ -2,6 +2,7 @@ import asyncio
 import math
 import os
 import shutil
+import ujson as json
 from datetime import datetime, timedelta
 from itertools import product
 from typing import Dict, List, Literal, Optional, TypeAlias, Tuple
@@ -33,15 +34,11 @@ def auction_df_filterer(historical_auctions_df: pd.DataFrame):
         # , errors="coerce"
     )
     historical_auctions_df.loc[
-        historical_auctions_df["original_security_term"].str.contains(
-            "29-Year", case=False, na=False
-        ),
+        historical_auctions_df["original_security_term"].str.contains("29-Year", case=False, na=False),
         "original_security_term",
     ] = "30-Year"
     historical_auctions_df.loc[
-        historical_auctions_df["original_security_term"].str.contains(
-            "30-", case=False, na=False
-        ),
+        historical_auctions_df["original_security_term"].str.contains("30-", case=False, na=False),
         "original_security_term",
     ] = "30-Year"
     historical_auctions_df = historical_auctions_df[
@@ -118,13 +115,8 @@ def get_last_n_off_the_run_cusips(
     auctions_df["auction_date"] = pd.to_datetime(auctions_df["auction_date"])
     auctions_df["issue_date"] = pd.to_datetime(auctions_df["issue_date"])
     current_date = as_of_date
-    auctions_df = auctions_df[
-        auctions_df["auction_date" if not use_issue_date else "issue_date"].dt.date
-        <= current_date.date()
-    ]
-    auctions_df = auctions_df.sort_values(
-        "auction_date" if not use_issue_date else "issue_date", ascending=False
-    )
+    auctions_df = auctions_df[auctions_df["auction_date" if not use_issue_date else "issue_date"].dt.date <= current_date.date()]
+    auctions_df = auctions_df.sort_values("auction_date" if not use_issue_date else "issue_date", ascending=False)
 
     mapping = {
         "4-Week": 0.077,
@@ -143,10 +135,7 @@ def get_last_n_off_the_run_cusips(
     }
 
     on_the_run = auctions_df.groupby("original_security_term").first().reset_index()
-    on_the_run = on_the_run[
-        (on_the_run["security_type"] == "Note")
-        | (on_the_run["security_type"] == "Bond")
-    ]
+    on_the_run = on_the_run[(on_the_run["security_type"] == "Note") | (on_the_run["security_type"] == "Bond")]
     on_the_run_result = on_the_run[
         [
             "original_security_term",
@@ -175,22 +164,12 @@ def get_last_n_off_the_run_cusips(
         return on_the_run
 
     off_the_run = auctions_df[~auctions_df.index.isin(on_the_run.index)]
-    off_the_run_result = (
-        off_the_run.groupby("original_security_term")
-        .nth(list(range(1, n + 1)))
-        .reset_index()
-    )
+    off_the_run_result = off_the_run.groupby("original_security_term").nth(list(range(1, n + 1))).reset_index()
 
-    combined_result = pd.concat(
-        [on_the_run_result, off_the_run_result], ignore_index=True
-    )
-    combined_result = combined_result.sort_values(
-        by=["original_security_term", "issue_date"], ascending=[True, False]
-    )
+    combined_result = pd.concat([on_the_run_result, off_the_run_result], ignore_index=True)
+    combined_result = combined_result.sort_values(by=["original_security_term", "issue_date"], ascending=[True, False])
 
-    combined_result["target_tenor"] = combined_result["original_security_term"].replace(
-        mapping
-    )
+    combined_result["target_tenor"] = combined_result["original_security_term"].replace(mapping)
     mask = combined_result["original_security_term"].isin(mapping.keys())
     mapped_and_filtered_df = combined_result[mask]
     grouped = mapped_and_filtered_df.groupby("original_security_term")
@@ -203,12 +182,7 @@ def get_last_n_off_the_run_cusips(
                 sublist.append(group.iloc[i].to_dict())
         sublist = sorted(sublist, key=lambda d: d["target_tenor"])
         if filtered:
-            wrapper.append(
-                {
-                    auctioned_dict["target_tenor"]: auctioned_dict["cusip"]
-                    for auctioned_dict in sublist
-                }
-            )
+            wrapper.append({auctioned_dict["target_tenor"]: auctioned_dict["cusip"] for auctioned_dict in sublist})
         else:
             wrapper.append(sublist)
 
@@ -222,16 +196,9 @@ def get_historical_on_the_run_cusips(
 ) -> pd.DataFrame:
 
     current_date = as_of_date
-    auctions_df = auctions_df[
-        auctions_df["auction_date" if not use_issue_date else "issue_date"].dt.date
-        <= current_date.date()
-    ]
-    auctions_df = auctions_df[
-        auctions_df["maturity_date"].dt.date >= current_date.date()
-    ]
-    auctions_df = auctions_df.sort_values(
-        "auction_date" if not use_issue_date else "issue_date", ascending=False
-    )
+    auctions_df = auctions_df[auctions_df["auction_date" if not use_issue_date else "issue_date"].dt.date <= current_date.date()]
+    auctions_df = auctions_df[auctions_df["maturity_date"].dt.date >= current_date.date()]
+    auctions_df = auctions_df.sort_values("auction_date" if not use_issue_date else "issue_date", ascending=False)
 
     mapping = {
         "17-Week": 0.25,
@@ -256,9 +223,7 @@ def get_historical_on_the_run_cusips(
             "issue_date",
         ]
     ]
-    on_the_run_filtered_df["target_tenor"] = on_the_run_filtered_df[
-        "original_security_term"
-    ].replace(mapping)
+    on_the_run_filtered_df["target_tenor"] = on_the_run_filtered_df["original_security_term"].replace(mapping)
 
     return on_the_run_filtered_df
 
@@ -277,35 +242,19 @@ def get_active_cusips(
 
     historical_auctions_df = auction_df_filterer(historical_auctions_df)
     historical_auctions_df = historical_auctions_df[
-        historical_auctions_df[
-            "auction_date" if not use_issue_date else "issue_date"
-        ].dt.date
-        <= as_of_date.date()
+        historical_auctions_df["auction_date" if not use_issue_date else "issue_date"].dt.date <= as_of_date.date()
     ]
-    historical_auctions_df = historical_auctions_df[
-        historical_auctions_df["maturity_date"] >= as_of_date
-    ]
-    historical_auctions_df = historical_auctions_df.drop_duplicates(
-        subset=["cusip"], keep="first"
-    )
-    historical_auctions_df["int_rate"] = pd.to_numeric(
-        historical_auctions_df["int_rate"], errors="coerce"
-    )
-    historical_auctions_df["time_to_maturity"] = (
-        historical_auctions_df["maturity_date"] - as_of_date
-    ).dt.days / 365
+    historical_auctions_df = historical_auctions_df[historical_auctions_df["maturity_date"] >= as_of_date]
+    historical_auctions_df = historical_auctions_df.drop_duplicates(subset=["cusip"], keep="first")
+    historical_auctions_df["int_rate"] = pd.to_numeric(historical_auctions_df["int_rate"], errors="coerce")
+    historical_auctions_df["time_to_maturity"] = (historical_auctions_df["maturity_date"] - as_of_date).dt.days / 365
     return historical_auctions_df
 
 
-def last_day_n_months_ago(
-    given_date: datetime, n: int = 1, return_all: bool = False
-) -> datetime | List[datetime]:
+def last_day_n_months_ago(given_date: datetime, n: int = 1, return_all: bool = False) -> datetime | List[datetime]:
     if return_all:
         given_date = pd.Timestamp(given_date)
-        return [
-            (given_date - pd.offsets.MonthEnd(i)).to_pydatetime()
-            for i in range(1, n + 1)
-        ]
+        return [(given_date - pd.offsets.MonthEnd(i)).to_pydatetime() for i in range(1, n + 1)]
 
     given_date = pd.Timestamp(given_date)
     last_day = given_date - pd.offsets.MonthEnd(n)
@@ -314,9 +263,7 @@ def last_day_n_months_ago(
 
 def cookie_string_to_dict(cookie_string):
     cookie_pairs = cookie_string.split("; ")
-    cookie_dict = {
-        pair.split("=")[0]: pair.split("=")[1] for pair in cookie_pairs if "=" in pair
-    }
+    cookie_dict = {pair.split("=")[0]: pair.split("=")[1] for pair in cookie_pairs if "=" in pair}
     return cookie_dict
 
 
@@ -379,14 +326,7 @@ def ust_labeler(row: pd.Series):
     mat_date = row["maturity_date"]
     tenor = row["original_security_term"]
     if np.isnan(row["int_rate"]):
-        return (
-            str(row["high_investment_rate"])[:5]
-            + "s , "
-            + mat_date.strftime("%b %y")
-            + "s"
-            + ", "
-            + tenor
-        )
+        return str(row["high_investment_rate"])[:5] + "s , " + mat_date.strftime("%b %y") + "s" + ", " + tenor
     return str(row["int_rate"]) + "s, " + mat_date.strftime("%b %y") + "s, " + tenor
 
 
@@ -399,25 +339,17 @@ def ust_sorter(term: str):
     return num * unit_multiplier[unit]
 
 
-def get_otr_cusips_by_date(
-    historical_auctions_df: pd.DataFrame, dates: list, use_issue_date: bool = True
-):
+def get_otr_cusips_by_date(historical_auctions_df: pd.DataFrame, dates: list, use_issue_date: bool = True):
     historical_auctions_df = auction_df_filterer(historical_auctions_df)
     date_column = "issue_date" if use_issue_date else "auction_date"
-    historical_auctions_df = historical_auctions_df.sort_values(
-        by=[date_column], ascending=False
-    )
-    historical_auctions_df = historical_auctions_df.drop_duplicates(
-        subset=["cusip"], keep="last"
-    )
+    historical_auctions_df = historical_auctions_df.sort_values(by=[date_column], ascending=False)
+    historical_auctions_df = historical_auctions_df.drop_duplicates(subset=["cusip"], keep="last")
     grouped = historical_auctions_df.groupby("original_security_term")
     otr_cusips_by_date = {date: [] for date in dates}
     for _, group in grouped:
         group = group.reset_index(drop=True)
         for date in dates:
-            filtered_group = group[
-                (group[date_column] <= date) & (group["maturity_date"] > date)
-            ]
+            filtered_group = group[(group[date_column] <= date) & (group["maturity_date"] > date)]
             if not filtered_group.empty:
                 otr_cusip = filtered_group.iloc[0]["cusip"]
                 otr_cusips_by_date[date].append(otr_cusip)
@@ -427,12 +359,8 @@ def get_otr_cusips_by_date(
 
 def process_cusip_otr_daterange(cusip, historical_auctions_df, date_column):
     try:
-        tenor = historical_auctions_df[historical_auctions_df["cusip"] == cusip][
-            "original_security_term"
-        ].iloc[0]
-        tenor_df: pd.DataFrame = historical_auctions_df[
-            historical_auctions_df["original_security_term"] == tenor
-        ].reset_index()
+        tenor = historical_auctions_df[historical_auctions_df["cusip"] == cusip]["original_security_term"].iloc[0]
+        tenor_df: pd.DataFrame = historical_auctions_df[historical_auctions_df["original_security_term"] == tenor].reset_index()
         otr_df = tenor_df[tenor_df["cusip"] == cusip]
         otr_index = otr_df.index[0]
         start_date: pd.Timestamp = otr_df[date_column].iloc[0]
@@ -453,30 +381,17 @@ def process_cusip_otr_daterange(cusip, historical_auctions_df, date_column):
         return cusip, {"start_date": None, "end_date": None}
 
 
-def get_otr_date_ranges(
-    historical_auctions_df: pd.DataFrame, cusips: List[str], use_issue_date: bool = True
-) -> Dict[str, Tuple[datetime, datetime]]:
+def get_otr_date_ranges(historical_auctions_df: pd.DataFrame, cusips: List[str], use_issue_date: bool = True) -> Dict[str, Tuple[datetime, datetime]]:
 
     historical_auctions_df = auction_df_filterer(historical_auctions_df)
     date_column = "issue_date" if use_issue_date else "auction_date"
-    historical_auctions_df = historical_auctions_df.sort_values(
-        by=[date_column], ascending=False
-    )
-    historical_auctions_df = historical_auctions_df[
-        historical_auctions_df["issue_date"].dt.date < datetime.today().date()
-    ]
-    historical_auctions_df = historical_auctions_df.drop_duplicates(
-        subset=["cusip"], keep="last"
-    )
+    historical_auctions_df = historical_auctions_df.sort_values(by=[date_column], ascending=False)
+    historical_auctions_df = historical_auctions_df[historical_auctions_df["issue_date"].dt.date < datetime.today().date()]
+    historical_auctions_df = historical_auctions_df.drop_duplicates(subset=["cusip"], keep="last")
 
     cusip_daterange_map = {}
     with ThreadPoolExecutor() as executor:
-        futures = {
-            executor.submit(
-                process_cusip_otr_daterange, cusip, historical_auctions_df, date_column
-            ): cusip
-            for cusip in cusips
-        }
+        futures = {executor.submit(process_cusip_otr_daterange, cusip, historical_auctions_df, date_column): cusip for cusip in cusips}
 
         for future in as_completed(futures):
             cusip, date_range = future.result()
@@ -519,14 +434,26 @@ def get_cstrips_cusips(
     as_of_date: Optional[datetime] = None,
 ):
     historical_auctions_df = auction_df_filterer(historical_auctions_df)
-    active_df = historical_auctions_df[
-        historical_auctions_df["maturity_date"] > as_of_date
-    ]
+    active_df = historical_auctions_df[historical_auctions_df["maturity_date"] > as_of_date]
     tint_cusip = "tint_cusip_1"
     active_df[tint_cusip] = active_df[tint_cusip].replace("null", np.nan)
     active_df = active_df[active_df[tint_cusip].notna()]
     active_df = active_df.sort_values(by=["maturity_date"]).reset_index(drop=True)
     return active_df[["maturity_date", tint_cusip]]
+
+
+def original_security_term_to_ql_period(original_security_term: str):
+    ost_ql_period = {
+        "52-Week": ql.Period("1Y"),
+        "2-Year": ql.Period("2Y"),
+        "3-Year": ql.Period("3Y"),
+        "5-Year": ql.Period("5Y"),
+        "7-Year": ql.Period("7Y"),
+        "10-Year": ql.Period("10Y"),
+        "20-Year": ql.Period("20Y"),
+        "30-Year": ql.Period("30Y"),
+    }
+    return ost_ql_period[original_security_term]
 
 
 def enhanced_plotly_blue_scale():
@@ -565,3 +492,44 @@ def enhanced_plotly_blue_scale():
     combined_scale = enhanced_blue_scale + transition_scale
 
     return combined_scale
+
+
+def to_quantlib_fixed_rate_bond_obj(bond_info: Dict[str, str], as_of_date: datetime, print_bond_info=False):
+    if print_bond_info:
+        print(json.dumps(bond_info, indent=4, default=str))
+    maturity_date: pd.Timestamp = bond_info["maturity_date"]
+    calendar = ql.UnitedStates(m=ql.UnitedStates.GovernmentBond)
+    today = calendar.adjust(pydatetime_to_quantlib_date(py_datetime=as_of_date))
+    ql.Settings.instance().evaluationDate = today
+    t_plus = 1
+    bond_settlement_date = calendar.advance(today, ql.Period(t_plus, ql.Days))
+
+    schedule = ql.Schedule(
+        bond_settlement_date,
+        pydatetime_to_quantlib_date(maturity_date),
+        ql.Period(ql.Semiannual),
+        calendar,
+        ql.ModifiedFollowing,
+        ql.ModifiedFollowing,
+        ql.DateGeneration.Backward,
+        False,
+    )
+    return ql.FixedRateBond(
+        t_plus,
+        100.0,
+        schedule,
+        [bond_info["int_rate"] / 100],
+        ql.ActualActual(ql.ActualActual.ISDA),
+    )
+
+class NoneReturningSpline:
+    def __init__(self, *args, **kwargs):
+        # Accept the same parameters as a usual spline, but do nothing with them
+        pass
+
+    def __call__(self, x):
+        # Always return None for any input x
+        if isinstance(x, (np.ndarray, list)):
+            return [None] * len(x)  # Return a list of None for multiple inputs
+        else:
+            return None

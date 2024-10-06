@@ -79,9 +79,9 @@ class USTreasuryDataFetcher(DataFetcherBase):
         self._historical_auctions_df["high_investment_rate"] = pd.to_numeric(self._historical_auctions_df["high_investment_rate"], errors="coerce")
         self._historical_auctions_df["ust_label"] = self._historical_auctions_df.apply(
             lambda row: (
-                f"{row['high_investment_rate']}% {row['maturity_date'].strftime('%b-%y')}"
+                f"{row['high_investment_rate']:.3f}% {row['maturity_date'].strftime('%b-%y')}"
                 if pd.isna(row["int_rate"])
-                else f"{row['int_rate']}% {row['maturity_date'].strftime('%b-%y')}"
+                else f"{row['int_rate']:.3f}% {row['maturity_date'].strftime('%b-%y')}"
             ),
             axis=1,
         )
@@ -103,16 +103,31 @@ class USTreasuryDataFetcher(DataFetcherBase):
         return f"{ust_row["int_rate"]}s {ust_row["maturity_date"]}"
 
     # ust_label = f"{row['int_rate']:.3f}% {row['maturity_date'].strftime('%b-%y')}"
-    def ust_label_to_cusip(self, ust_label: str):
+    def ust_label_to_cusip(self, ust_label: str, return_all_occurrences=False):
         try:
             ust_row = self._historical_auctions_df[self._historical_auctions_df["ust_label"] == ust_label]
-            return ust_row.to_dict("records")[0]
-        except:
-            raise Exception("LABEL NOT FOUND")
-
-    def cusip_to_ust_label(self, cusip: str):
-        ust_row = self._historical_auctions_df[self._historical_auctions_df["cusip"] == cusip].to_dict("records")[0]
-        return ust_row["ust_label"]
+            occurences = ust_row.to_dict("records")
+            if return_all_occurrences:
+                return occurences
+            return occurences[-1] # return the earliest issue date by default
+        except Exception as e:
+            if ust_row.empty:
+                raise Exception(f"LABEL NOT FOUND - {e}")
+            else:
+                raise Exception(f"SOMETHING WENT WRONG - {e}")
+                
+    def cusip_to_ust_label(self, cusip: str, return_all_occurrences=False):
+        try:
+            ust_row = self._historical_auctions_df[self._historical_auctions_df["cusip"] == cusip]
+            occurences = ust_row.to_dict("records")
+            if return_all_occurrences:
+                return occurences
+            return occurences[-1] # return the earliest issue date by default
+        except Exception as e:
+            if ust_row.empty:
+                raise Exception(f"CUSIP NOT FOUND - {e}")
+            else:
+                raise Exception(f"SOMETHING WENT WRONG - {e}")
 
     async def _build_fetch_tasks_historical_treasury_auctions(
         self,

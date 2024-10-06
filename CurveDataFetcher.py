@@ -29,13 +29,7 @@ from DataFetcher.wsj import WSJDataFetcher
 from DataFetcher.yf import YahooFinanceDataFetcher
 from utils.QL_BondPricer import QL_BondPricer
 from utils.RL_BondPricer import RL_BondPricer
-from utils.utils import (
-    get_active_cusips,
-    get_last_n_off_the_run_cusips,
-    is_valid_ust_cusip,
-    ust_labeler,
-    ust_sorter,
-)
+from utils.utils import get_active_cusips, get_last_n_off_the_run_cusips, is_valid_ust_cusip, ust_labeler, ust_sorter, NoneReturningSpline
 
 warnings.filterwarnings("ignore", category=pd.errors.SettingWithCopyWarning)
 warnings.simplefilter(action="ignore", category=FutureWarning)
@@ -279,7 +273,7 @@ class CurveDataFetcher:
         fetch_soma_holdings: Optional[bool] = False,
         fetch_stripping_data: Optional[bool] = False,
         calc_free_float: Optional[bool] = False,
-        fitted_curves: Optional[List[Tuple[str, Callable]]] = None,
+        fitted_curves: Optional[List[Tuple[str, str, Callable]] | List[Tuple[str, str, Callable, Callable]]] = None,
         max_concurrent_tasks: Optional[int] = 128,
         max_connections: Optional[int] = 64,
     ) -> Tuple[Dict[datetime, pd.DataFrame], Dict[datetime, Dict[str, GeneralCurveInterpolator]]]:
@@ -432,8 +426,7 @@ class CurveDataFetcher:
                         if len(curve_build_params) == 3:
                             if callable(curve_build_params[-1]):
                                 curve_set_key, quote_type, filter_func = curve_build_params
-
-                                curr_filtered_curve_set_df = filter_func(curr_curve_set_df)
+                                curr_filtered_curve_set_df: pd.DataFrame = filter_func(curr_curve_set_df)
 
                                 if curr_dt not in curveset_intrep_dict:
                                     curveset_intrep_dict[curr_dt] = {}
@@ -444,9 +437,37 @@ class CurveDataFetcher:
                                     x=curr_filtered_curve_set_df["time_to_maturity"].to_numpy(), y=curr_filtered_curve_set_df[quote_type].to_numpy()
                                 )
 
+                        elif len(curve_build_params) == 4:
+                            if callable(curve_build_params[-2]) and callable(curve_build_params[-2]):
+                                curve_set_key, quote_type, filter_func, calibrate_func = curve_build_params
+                                curr_filtered_curve_set_df: pd.DataFrame = filter_func(curr_curve_set_df)
+
+                                if curr_dt not in curveset_intrep_dict:
+                                    curveset_intrep_dict[curr_dt] = {}
+                                if curve_set_key not in curveset_intrep_dict[curr_dt]:
+                                    curveset_intrep_dict[curr_dt][curve_set_key] = {}
+
+                                try:
+                                    curr_filtered_curve_set_df = (
+                                        curr_filtered_curve_set_df[["time_to_maturity", quote_type]].dropna().sort_values(by="time_to_maturity")
+                                    )
+                                    parameteric_model = calibrate_func(
+                                        curr_filtered_curve_set_df["time_to_maturity"].to_numpy(),
+                                        curr_filtered_curve_set_df[quote_type].to_numpy(),
+                                    )
+                                    assert parameteric_model[1]
+                                    curveset_intrep_dict[curr_dt][curve_set_key] = parameteric_model[0]
+
+                                except Exception as e:
+                                    # print(f"{curve_set_key} for {curr_dt} - {str(e)}")
+                                    curveset_intrep_dict[curr_dt][curve_set_key] = NoneReturningSpline(
+                                        curr_filtered_curve_set_df["time_to_maturity"].to_numpy(),
+                                        curr_filtered_curve_set_df[quote_type].to_numpy(),
+                                    )
+
         if fitted_curves:
-            return curveset_dict_df, curveset_intrep_dict 
-            
+            return curveset_dict_df, curveset_intrep_dict
+
         return curveset_dict_df
 
     def build_curve_set(
