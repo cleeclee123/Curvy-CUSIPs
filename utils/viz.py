@@ -14,12 +14,7 @@ import statsmodels.api as sm
 
 sns.set_style("whitegrid", {"grid.linestyle": "--"})
 
-import nest_asyncio
-
-nest_asyncio.apply()
-
 import warnings
-
 warnings.simplefilter(action="ignore", category=FutureWarning)
 
 
@@ -329,15 +324,17 @@ def plot_residuals_timeseries(
 
     plt.figure(figsize=(20, 10))
     plt.plot(df[date_col], residuals if not plot_zscores else zscores, linestyle="-", color="blue")
-    plt.axhline(y=0, color="red", linestyle="--")
+    # plt.axhline(y=0, color="red", linestyle="--")
     equation_text = f"y = {intercept:.3f} + {slope:.3f}*{slope_name}\nR² = {r_squared:.3f}\nSE = {results.bse["const"]:.3f}\np-value ({slope_name}) = {p_value:.3e}"
     plt.plot([], [], " ", label=f"{equation_text}")
     
     if stds:
         resid_std = tstd(residuals) 
+        resid_mean = np.mean(residuals) 
+        plt.axhline(resid_mean, linestyle="--", color="red", label=f"Resid Mean: {resid_mean}")
         for std in stds:
-            curr = plt.axhline(resid_std * std, linestyle="--", label=f"+/- {std} STD")
-            plt.axhline(resid_std * -1 * std, linestyle="--", color=curr.get_color())
+            curr = plt.axhline(resid_mean + resid_std * std, linestyle="--", label=f"+/- {std} STD")
+            plt.axhline(resid_mean + resid_std * -1 * std, linestyle="--", color=curr.get_color())
     
     if rolling_stds:
         for std, window in rolling_stds:
@@ -402,7 +399,58 @@ def plot_mr_residuals_timeseries(
     plt.title(title + (", Z-Scores" if plot_zscores else ""), fontdict={"fontsize": "x-large"})
     plt.grid(True)
     plt.show()
+
+
+def run_rolling_regression_df(df: pd.DataFrame, x_col: str, y_col: str, window: int, title: Optional[str] = None):
+    df = df.copy()
     
+    if x_col not in df.columns or y_col not in df.columns:
+        raise Exception(f"{x_col} or {y_col} not in df cols")
+
+    def calculate_r_squared(x, y):
+        Y = y
+        X = x 
+        X = sm.add_constant(X)  
+        model = sm.OLS(Y, X)
+        results = model.fit()
+        r_squared = results.rsquared 
+        return r_squared
+
+    rolling_r_squared = []
+    for rolling_df in df[[x_col, y_col]].rolling(window=window):
+        if len(rolling_df.index) < window:
+            rolling_r_squared.append(np.nan)
+        else: 
+            r_squared = calculate_r_squared(rolling_df[x_col], rolling_df[y_col])
+            rolling_r_squared.append(r_squared) 
+        
+    plt.figure(figsize=(20, 10))
+    plt.plot(df['Date'], rolling_r_squared, label=f'Rolling R-squared (window={window})')
+    
+    most_recent = df["Date"].iloc[-1]
+    plt.scatter(
+        most_recent,
+        rolling_r_squared[-1],
+        color="purple",
+        s=100,
+        label=f"Most Recent: {most_recent}, R² = {rolling_r_squared[-1]}"
+    )
+
+    plt.xlabel('Date')
+    plt.ylabel('R-squared')
+    plt.title(title or f"Rolling R-squared: {y_col} Regressed on {x_col}", fontdict={"fontsize": "x-large"})
+    
+    mean_r_squared = np.nanmean(rolling_r_squared)
+    std_r_squared = np.nanstd(rolling_r_squared)
+    stats_text = f"Mean R² = {mean_r_squared:.3f}\nStd R² = {std_r_squared:.3f}"
+    plt.plot([], [], ' ', label=stats_text)
+
+    plt.legend(fontsize="x-large")
+    plt.grid(True)
+    plt.show()
+
+    return rolling_r_squared
+
 
 def par_curve_func(tenor, zero_curve_func, is_parametric_class=False):
     if is_parametric_class:
@@ -448,6 +496,7 @@ def plot_usts(
     linspace_num: Optional[int] = 1000,
     y_axis_range: Optional[Annotated[List[int], 2]] = [3.33, 5.5],
     plot_height=1000,
+    plot_width=1500,
 ):
     curve_set_df = curve_set_df.copy()
 
@@ -595,6 +644,17 @@ def plot_usts(
                     name=label,
                 )
             )
+        
+        zero_spline, label = zero_curves[0]
+        residuals = curve_set_df[ytm_col].to_numpy() - zero_spline(curve_set_df[ttm_col].to_numpy())
+        plt.figure(figsize=(20, 10))
+        plt.scatter(curve_set_df[ttm_col], residuals * 100, color="b", label="Residuals (bps)")
+        plt.axhline(0, color="r", linestyle="--")
+        plt.xlabel(ttm_col)
+        plt.ylabel("Residuals (bps)")
+        plt.title(f"Residuals of {label} Spline Fit", fontdict={"fontsize": "x-large"})
+        plt.legend(fontsize="x-large")
+        plt.ylim(-50, 50)
 
     if par_curves:
         cfs = np.arange(0.5, 30 + 1, 0.5)
@@ -718,6 +778,7 @@ def plot_usts(
         showlegend=True,
         template="plotly_dark",
         height=plot_height,
+        width=plot_width,
     )
     fig.update_xaxes(showspikes=True, spikecolor="white", spikesnap="cursor", spikemode="across")
     fig.update_yaxes(
@@ -739,3 +800,4 @@ def plot_usts(
             ]
         }
     )
+    plt.show()
