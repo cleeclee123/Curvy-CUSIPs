@@ -6,6 +6,8 @@ from typing import List, Optional, Annotated, Literal, Dict
 import matplotlib.pyplot as plt
 import plotly.graph_objs as go
 from plotly.subplots import make_subplots
+from sklearn.cluster import KMeans
+from scipy.spatial import ConvexHull
 import numpy as np
 import pandas as pd
 import seaborn as sns
@@ -65,25 +67,13 @@ def identify_yield_curve_movements(
         resample_df = df.resample(resample).last()
         resampled_changes = resample_df.diff()
         for i in range(1, len(resampled_changes)):
-            if (
-                resampled_changes["PC1"].iloc[i] < 0
-                and resampled_changes["PC2"].iloc[i] > 0
-            ):
+            if resampled_changes["PC1"].iloc[i] < 0 and resampled_changes["PC2"].iloc[i] > 0:
                 movements[0].append(resampled_changes.index[i])
-            elif (
-                resampled_changes["PC1"].iloc[i] > 0
-                and resampled_changes["PC2"].iloc[i] > 0
-            ):
+            elif resampled_changes["PC1"].iloc[i] > 0 and resampled_changes["PC2"].iloc[i] > 0:
                 movements[1].append(resampled_changes.index[i])
-            elif (
-                resampled_changes["PC1"].iloc[i] < 0
-                and resampled_changes["PC2"].iloc[i] < 0
-            ):
+            elif resampled_changes["PC1"].iloc[i] < 0 and resampled_changes["PC2"].iloc[i] < 0:
                 movements[2].append(resampled_changes.index[i])
-            elif (
-                resampled_changes["PC1"].iloc[i] > 0
-                and resampled_changes["PC2"].iloc[i] < 0
-            ):
+            elif resampled_changes["PC1"].iloc[i] > 0 and resampled_changes["PC2"].iloc[i] < 0:
                 movements[3].append(resampled_changes.index[i])
     else:
         for i in range(1, len(pc1)):
@@ -136,7 +126,7 @@ CS PCA Note:
 
 
 """
-
+# BIG TODO break this function up!
 
 def run_pca_yield_curve(
     df: pd.DataFrame,
@@ -156,19 +146,27 @@ def run_pca_yield_curve(
     show_reconstructed: Optional[bool] = False,
     curve_analysis_resampling_window: Optional[Literal["W", "M", "Y"]] = None,
     show_bull_steepening_periods: Optional[bool] = False,
-    show_bear_steepening_periods: Optional[bool] = False,
-    show_bull_flattening_periods: Optional[bool] = False,
-    show_bear_flattening_periods: Optional[bool] = False,
+    # show_bear_steepening_periods: Optional[bool] = False,
+    # show_bull_flattening_periods: Optional[bool] = False,
+    # show_bear_flattening_periods: Optional[bool] = False,
     is_cmt_df=False,
     is_cusips=False,
+    html_path: Optional[str] = None,
+    show_clusters: Optional[bool] = False,
+    num_clusters=8,
+    overlay_df: Optional[pd.DataFrame] = None,
+    to_overlay_pcs_v_time_cols: Optional[Annotated[List[str], 3]] = None
 ):
     df = df.copy()
     if date_subset_range:
         df = df.loc[date_subset_range[0] : date_subset_range[1]]
 
-    to_return_dict = {
+    to_return_dict: Dict[str, pd.DataFrame | List] = {
         "reconstructed_df": None,
         "factor_loadings_df": None,
+        "biplot_df": None,
+        "cumulative_explained_variance": None,
+        "explained_variance": None,
     }
 
     if run_on_diff:
@@ -186,7 +184,9 @@ def run_pca_yield_curve(
         pca.fit(data_scaled)
         cumulative_explained_variance = np.cumsum(pca.explained_variance_ratio_)
         explained_variance = pca.explained_variance_ratio_
-
+        to_return_dict["cumulative_explained_variance"] = cumulative_explained_variance
+        to_return_dict["explained_variance"] = explained_variance
+        
         _, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10))
         ax1.plot(cumulative_explained_variance, marker="o")
         ax1.set_xlabel("Number of Components")
@@ -210,15 +210,13 @@ def run_pca_yield_curve(
 
     if show_eigenvectors:
         tenors_label = df.columns
-        fig, axes = plt.subplots(1, 3, figsize=(12, 6))
+        fig, axes = plt.subplots(1, 3, figsize=(17, 10))
         pclabels = ["Level", "Slope", "Curvature"]
         for i in range(3):
             axes[i].plot(tenors_label, pca_obj.components_[i, :])
             axes[i].set_title(f"Principal Component {i+1} ({pclabels[i]})")
             axes[i].set_xlabel("Tenor")
-            axes[i].set_ylabel(
-                "Loading (bps)" if not run_on_diff else "Loading (bps change)"
-            )
+            axes[i].set_ylabel("Loading (bps)" if not run_on_diff else "Loading (bps change)")
             axes[i].set_xticks(tenors_label)
             axes[i].tick_params(axis="x", rotation=45)
             axes[i].grid(True)
@@ -232,9 +230,7 @@ def run_pca_yield_curve(
 
     if show_reconstructed:
         reconstructed_values = pca_obj.inverse_transform(data_fitted_transf_pca)
-        reconstructed_df = pd.DataFrame(
-            reconstructed_values, columns=df.columns, index=df.index
-        )
+        reconstructed_df = pd.DataFrame(reconstructed_values, columns=df.columns, index=df.index)
         to_return_dict["reconstructed_df"] = reconstructed_df
         reconstruction_error = mean_squared_error(df, reconstructed_values)
         print("\nReconstruction Error (MSE):", reconstruction_error)
@@ -242,14 +238,24 @@ def run_pca_yield_curve(
     if show_hedge_ratios:
         pass
 
-    # PCA Unleashed 3d scatterplot
+    # biplot
     if show_3d_plot:
+        biplot_df = pd.DataFrame(
+            {
+                "Date": df.index,
+                "PC1": data_fitted_transf_pca[:, 0],
+                # flipping signs here
+                "PC2": -1 * data_fitted_transf_pca[:, 1],
+                "PC3": -1 * data_fitted_transf_pca[:, 2],
+            }
+        )
+
         if is_cmt_df:
             default_tenor_vect_color = {
                 "CMT3M": "red",
                 "CMT6M": "red",
                 "CMT1": "red",
-                "CMT2": "red",
+                "CMT2": "orange",
                 "CMT3": "orange",
                 "CMT5": "orange",
                 "CMT7": "orange",
@@ -271,36 +277,67 @@ def run_pca_yield_curve(
                 "CT30": "cornflowerblue",
             }
 
-        hover_text = [
-            f"Date: {date}<br>"
-            + f"PC1: {data_fitted_transf_pca[i, 0]:.4f}<br>"
-            + f"PC2: {data_fitted_transf_pca[i, 1]:.4f}<br>"
-            + f"PC3: {data_fitted_transf_pca[i, 2]:.4f}"
-            for i, date in enumerate(df.index)
-        ]
-        scatter = go.Scatter3d(
-            x=data_fitted_transf_pca[:, 0],
-            y=data_fitted_transf_pca[:, 2],
-            z=data_fitted_transf_pca[:, 1],
-            mode="markers",
-            marker=dict(
-                size=4,
-                color=data_fitted_transf_pca[:, 1],
-                colorscale="RdBu",
-                opacity=0.8,
-            ),
-            text=hover_text,
-            hoverinfo="text",
-            name="PC Loadings",
-        )
+        if show_clusters:
+            kmeans = KMeans(n_clusters=num_clusters, random_state=0, n_init="auto").fit(biplot_df.set_index("Date"))
+            biplot_df["cluster"] = kmeans.labels_
+            to_return_dict["biplot_df"] = biplot_df.copy()
+            hover_text = [
+                f"Date: {row["Date"]}<br>"
+                + f"PC1: {row["PC1"]:.4f}<br>"
+                + f"PC2: {row["PC2"]:.4f}<br>"
+                + f"PC3: {row["PC3"]:.4f}<br>"
+                + f"Cluster: {row["cluster"]}"
+                for _, row in biplot_df.iterrows()
+            ]
+            biplot_df["hover_text"] = hover_text
+        else:
+            hover_text = [
+                f"Date: {row["Date"]}<br>" + f"PC1: {row["PC1"]:.4f}<br>" + f"PC2: {row["PC2"]:.4f}<br>" + f"PC3: {row["PC3"]:.4f}"
+                for _, row in biplot_df.iterrows()
+            ]
+            to_return_dict["biplot_df"] = biplot_df.copy()
+
+        traces = []
+        if show_clusters:
+            biplot_df = biplot_df.sort_values(by=["cluster"])
+            for cluster_id in biplot_df["cluster"].unique():
+                cluster_data = biplot_df[biplot_df["cluster"] == cluster_id]
+                trace = go.Scatter3d(
+                    x=cluster_data["PC1"],
+                    y=cluster_data["PC2"],
+                    z=cluster_data["PC3"],
+                    mode="markers",
+                    marker=dict(size=4, color=cluster_id, colorscale="RdBu", opacity=0.8),
+                    text=cluster_data["hover_text"],
+                    hoverinfo="text",
+                    name=f"Cluster {cluster_id}",
+                )
+                traces.append(trace)
+        else:
+            scatter = go.Scatter3d(
+                x=biplot_df["PC1"],
+                y=biplot_df["PC2"],
+                z=biplot_df["PC3"],
+                mode="markers",
+                marker=dict(
+                    size=4,
+                    color=biplot_df["PC2"],
+                    colorscale="RdBu",
+                    opacity=0.8,
+                ),
+                text=hover_text,
+                hoverinfo="text",
+            )
+            traces.append(scatter)
 
         vectors = []
         for i, tenor in enumerate(df.columns):
+            # sign flipping here maybe?
             vectors.append(
                 go.Scatter3d(
                     x=[0, pca_obj.components_[0, i]],
-                    y=[0, pca_obj.components_[2, i]],
-                    z=[0, pca_obj.components_[1, i]],
+                    y=[0, pca_obj.components_[1, i]],
+                    z=[0, pca_obj.components_[2, i]],
                     mode="lines+text",
                     line=dict(color=default_tenor_vect_color[tenor], width=3) if not is_cusips else None,
                     text=["", tenor],
@@ -315,29 +352,29 @@ def run_pca_yield_curve(
         layout = go.Layout(
             scene=dict(
                 xaxis_title=f"PC1 ({pca_obj.explained_variance_ratio_[0]:.2%})",
-                yaxis_title=f"PC3 ({pca_obj.explained_variance_ratio_[2]:.2%})",
-                zaxis_title=f"PC2 ({pca_obj.explained_variance_ratio_[1]:.2%})",
+                yaxis_title=f"PC2 ({pca_obj.explained_variance_ratio_[1]:.2%})",
+                zaxis_title=f"PC3 ({pca_obj.explained_variance_ratio_[2]:.2%})",
                 aspectmode="manual",
                 aspectratio=dict(x=2, y=2, z=1),
             ),
             title="Interactive 3D PCA Biplot of CT Yields",
             height=1050,
-            width=1300,
+            width=1400,
             template="plotly_dark",
         )
-        fig = go.Figure(data=[scatter] + vectors, layout=layout)
-        fig.update_xaxes(
-            showspikes=True, spikecolor="white", spikesnap="cursor", spikemode="across"
-        )
-        fig.update_yaxes(
-            showspikes=True, spikecolor="white", spikesnap="cursor", spikethickness=0.5
-        )
+        data = traces + vectors
+        fig = go.Figure(data=data, layout=layout)
+        fig.update_xaxes(showspikes=True, spikecolor="white", spikesnap="cursor", spikemode="across")
+        fig.update_yaxes(showspikes=True, spikecolor="white", spikesnap="cursor", spikethickness=0.5)
+        if html_path:
+            fig.write_html(html_path)
         fig.show()
 
     if show_pc_scores_timeseries:
         pc1 = data_fitted_transf_pca[:, 0]
-        pc2 = data_fitted_transf_pca[:, 1]
-        pc3 = data_fitted_transf_pca[:, 2]
+        # flipping signs
+        pc2 = -1 * data_fitted_transf_pca[:, 1]
+        pc3 = -1 * data_fitted_transf_pca[:, 2]
 
         if window:
             moving_avg_pc1 = pd.Series(pc1).rolling(window=window).mean()
@@ -355,10 +392,6 @@ def run_pca_yield_curve(
         trend_pc1 = model_pc1.predict(time_values)
         trend_pc2 = model_pc2.predict(time_values)
         trend_pc3 = model_pc3.predict(time_values)
-
-        movements = identify_yield_curve_movements(
-            pc1, pc2, df.index.to_list(), resample=curve_analysis_resampling_window
-        )
 
         _, axes = plt.subplots(3, 1, figsize=(15, 20))
 
@@ -388,6 +421,12 @@ def run_pca_yield_curve(
                 "color": "red",
             },
         ]
+        
+        opp_colors = {
+            "blue": "blueviolet",
+            "green": "cyan",
+            "red": "orange",
+        }
 
         for i in [0, 1, 2]:
             pca_container[i]["label"]
@@ -397,6 +436,16 @@ def run_pca_yield_curve(
                 color=pca_container[i]["color"],
                 label=pca_container[i]["label"],
             )
+            if to_overlay_pcs_v_time_cols and overlay_df is not None:
+                ax2 = axes[i].twinx()
+                ax2.plot(
+                    overlay_df.index,
+                    overlay_df[to_overlay_pcs_v_time_cols[i]],
+                    color=opp_colors[pca_container[i]["color"]],
+                    label=to_overlay_pcs_v_time_cols[i],
+                )
+                ax2.set_ylabel(to_overlay_pcs_v_time_cols[i], color=opp_colors[pca_container[i]["color"]])
+
             recent = pca_container[i]["trend"][-1]
             if show_most_recent:
                 axes[i].axhline(
@@ -431,9 +480,7 @@ def run_pca_yield_curve(
                     [datetime(2020, 2, 1), datetime(2020, 4, 1)],
                 ]
                 if date_subset_range:
-                    start_plot_range, end_plot_range = min(date_subset_range), max(
-                        date_subset_range
-                    )
+                    start_plot_range, end_plot_range = min(date_subset_range), max(date_subset_range)
                 else:
                     start_plot_range, end_plot_range = min(df.index), max(df.index)
 
@@ -441,47 +488,16 @@ def run_pca_yield_curve(
                     if start <= end_plot_range and end >= start_plot_range:
                         axes[i].axvspan(start, end, color="lightcoral", alpha=0.3)
 
-            if show_bull_steepening_periods:
-                bs_date_ranges = split_dates_into_ranges(movements[0])
-                print(bs_date_ranges)
-                for date_ranges in bs_date_ranges:
-                    if (
-                        len(date_ranges) == 1
-                        and curve_analysis_resampling_window == "W"
-                    ):
-                        axes[i].axvspan(
-                            date_ranges[0] - pd.offsets.BDay(5),
-                            date_ranges[0],
-                            color="lime",
-                            alpha=0.2,
-                        )
-                    elif (
-                        len(date_ranges) == 1
-                        and curve_analysis_resampling_window == "M"
-                    ):
-                        axes[i].axvspan(
-                            date_ranges[0] - pd.offsets.BDay(20),
-                            date_ranges[0],
-                            color="lime",
-                            alpha=0.2,
-                        )
-                    elif (
-                        len(date_ranges) == 1
-                        and curve_analysis_resampling_window == "Y"
-                    ):
-                        axes[i].axvspan(
-                            date_ranges[0] - pd.offsets.BDay(240),
-                            date_ranges[0],
-                            color="lime",
-                            alpha=0.2,
-                        )
-                    else:
-                        start, end = min(date_ranges), max(date_ranges)
-                        axes[i].axvspan(start, end, color="lime", alpha=0.2)
-
             axes[i].set_title(f"PC{i+1} over Time")
-            axes[i].set_ylabel(f"PC{i+1} Score")
-            axes[i].legend()
+            axes[i].set_ylabel(f"PC{i+1} Score", color=pca_container[i]["color"])
+            
+            if to_overlay_pcs_v_time_cols and overlay_df is not None: 
+                lines, labels = axes[i].get_legend_handles_labels()
+                lines2, labels2 = ax2.get_legend_handles_labels()
+                ax2.legend(lines + lines2, labels + labels2, loc=0)
+            else:
+                axes[i].legend()
+            
             axes[i].grid(True)
 
         plt.tight_layout()
@@ -501,16 +517,12 @@ def create_residuals_surface_plot(residuals_df, tick_freq=30):
                 cmin=-np.max(np.abs(residuals_df.values)),
                 cmax=np.max(np.abs(residuals_df.values)),
                 customdata=residuals_df[["CT1"]],
-                hovertemplate="Date: %{y}"
-                + "<br>Tenor: %{x}"
-                + "<br>Residual: %{z}<extra></extra>",
+                hovertemplate="Date: %{y}" + "<br>Tenor: %{x}" + "<br>Residual: %{z}<extra></extra>",
             )
         ]
     )
     fig.update_traces(
-        contours_z=dict(
-            show=True, usecolormap=True, highlightcolor="limegreen", project_z=True
-        ),
+        contours_z=dict(show=True, usecolormap=True, highlightcolor="limegreen", project_z=True),
     )
 
     fig.update_layout(
@@ -532,15 +544,9 @@ def create_residuals_surface_plot(residuals_df, tick_freq=30):
         ),
         template="plotly_dark",
     )
-    fig.update_traces(
-        colorbar=dict(title="Residual Value", thickness=20, len=0.75, x=0.95)
-    )
-    fig.update_xaxes(
-        showspikes=True, spikecolor="white", spikesnap="cursor", spikemode="across"
-    )
-    fig.update_yaxes(
-        showspikes=True, spikecolor="white", spikesnap="cursor", spikethickness=0.5
-    )
+    fig.update_traces(colorbar=dict(title="Residual Value", thickness=20, len=0.75, x=0.95))
+    fig.update_xaxes(showspikes=True, spikecolor="white", spikesnap="cursor", spikemode="across")
+    fig.update_yaxes(showspikes=True, spikecolor="white", spikesnap="cursor", spikethickness=0.5)
     return fig
 
 

@@ -1,6 +1,6 @@
 import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Literal, Optional
 
 import numpy as np
@@ -959,7 +959,13 @@ def reprice_bonds(
 
 
 def calc_ust_metrics(
-    bond_info: str, curr_price: float, curr_ytm: float, as_of_date: datetime, scipy_interp: scipy.interpolate.interpolate, print_bond_info=False
+    bond_info: str, 
+    curr_price: float, 
+    curr_ytm: float, 
+    on_rate: float,
+    as_of_date: datetime, 
+    scipy_interp: scipy.interpolate.interpolate, 
+    print_bond_info=False, 
 ):
     calendar = ql.UnitedStates(ql.UnitedStates.GovernmentBond)
     day_count = ql.ActualActual(ql.ActualActual.ISDA)
@@ -1019,6 +1025,10 @@ def calc_ust_metrics(
     rate = ql.InterestRate(curr_ytm / 100, day_count, ql.Compounded, ql.Semiannual)
     bps_value = ql.BondFunctions.basisPointValue(ql_fixed_rate_bond_obj, rate, bond_settlement_date)
     dv01_1mm = bps_value * 1_000_000 / 100
+    impl_spot_3m_fwds = calc_ust_impl_spot_n_fwd_curve(n=0.25, scipy_interp_curve=scipy_interp, return_scipy=True)
+    impl_spot_6m_fwds = calc_ust_impl_spot_n_fwd_curve(n=0.5, scipy_interp_curve=scipy_interp, return_scipy=True)
+    impl_spot_12m_fwds = calc_ust_impl_spot_n_fwd_curve(n=1, scipy_interp_curve=scipy_interp, return_scipy=True)
+    bond_ttm: timedelta = (bond_info["maturity_date"] - as_of_date)
 
     metrics = {
         "Date": as_of_date,
@@ -1034,23 +1044,35 @@ def calc_ust_metrics(
         "convexity": ql.BondFunctions.convexity(ql_fixed_rate_bond_obj, rate, bond_settlement_date),
         "basis_point_value": ql.BondFunctions.basisPointValue(ql_fixed_rate_bond_obj, rate, bond_settlement_date),
         "yield_value_basis_point": ql.BondFunctions.yieldValueBasisPoint(ql_fixed_rate_bond_obj, rate, bond_settlement_date),
+        "rough_carry": curr_ytm - on_rate, 
+        "rough_3m_rolldown": (impl_spot_3m_fwds(float(bond_ttm.days / 365)) - curr_ytm) * 100,
+        "rough_6m_rolldown": (impl_spot_6m_fwds(float(bond_ttm.days / 365)) - curr_ytm) * 100,
+        "rough_12m_rolldown": (impl_spot_12m_fwds(float(bond_ttm.days / 365)) - curr_ytm) * 100
     }
 
-    for fwd_m in [3, 6, 9, 12]:
-        forward_date_m = calendar.advance(today, ql.Period(fwd_m, ql.Months))
-        forward_rate_m = yield_curve_handle.forwardRate(today, forward_date_m, day_count, ql.Compounded, ql.Semiannual).rate()
-        forward_yield_m = forward_rate_m * 100
-        accrued_amount_m = ql.BondFunctions.accruedAmount(ql_fixed_rate_bond_obj, forward_date_m)
-        ql.Settings.instance().evaluationDate = forward_date_m
-        ql_fixed_rate_bond_obj.setPricingEngine(engine)
-        price_after_roll = ql_fixed_rate_bond_obj.cleanPrice()
-        ql.Settings.instance().evaluationDate = today
-        carry_and_roll = (price_after_roll - curr_price) + accrued_amount_m
-
-        metrics[f"{fwd_m}m_fwd_yield"] = forward_yield_m
-        metrics[f"{fwd_m}m_carry_and_roll"] = carry_and_roll
-
     return metrics
+
+
+def calc_ust_impl_spot_n_fwd_curve(n: float | int, scipy_interp_curve: scipy.interpolate.interpolate, return_scipy=False) -> Dict[float, float]:
+    cfs = np.arange(0.5, 30 + 1, 0.5)
+    implied_spot_rates = []
+    first_n_cfs = 0
+    for t in cfs:
+        if t > n:
+            Z_t_temp = scipy_interp_curve(t)
+            Z_n = scipy_interp_curve(n)
+            Z_n_t = (Z_t_temp * t - Z_n * n) / (t - n)
+            implied_spot_rates.append(Z_n_t)
+        else:
+            if return_scipy:
+                # implied_spot_rates.append(0)
+                first_n_cfs += 1
+            else:
+                implied_spot_rates.append(np.nan)
+    
+    if return_scipy:
+        return scipy.interpolate.CubicSpline(x=cfs[first_n_cfs:], y=implied_spot_rates)
+    return dict(zip(cfs, implied_spot_rates))        
 
 
 def calc_ust_metrics_parallel(

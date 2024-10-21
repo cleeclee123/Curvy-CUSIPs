@@ -90,22 +90,16 @@ class FedInvestDataFetcher(DataFetcherBase):
                     )
                     if response.is_redirect:
                         redirect_url = response.headers.get("Location")
-                        self._logger.debug(
-                            f"UST Prices - {date} Redirecting to {redirect_url}"
-                        )
+                        self._logger.debug(f"UST Prices - {date} Redirecting to {redirect_url}")
                         response = await client.get(redirect_url, headers=headers)
 
                     response.raise_for_status()
                     tables = pd.read_html(response.content, header=0)
                     df = tables[0]
                     if cusips:
-                        missing_cusips = [
-                            cusip for cusip in cusips if cusip not in df["CUSIP"].values
-                        ]
+                        missing_cusips = [cusip for cusip in cusips if cusip not in df["CUSIP"].values]
                         if missing_cusips:
-                            self._logger.warning(
-                                f"UST Prices Warning - The following CUSIPs are not found in the DataFrame: {missing_cusips}"
-                            )
+                            self._logger.warning(f"UST Prices Warning - The following CUSIPs are not found in the DataFrame: {missing_cusips}")
                     df = df[df["CUSIP"].isin(cusips)] if cusips else df
                     df.columns = df.columns.str.lower()
                     df = df.query("`security type` not in ['TIPS', 'MARKET BASED FRN']")
@@ -121,27 +115,21 @@ class FedInvestDataFetcher(DataFetcherBase):
                     return date, df[cols_to_return]
 
                 except httpx.HTTPStatusError as e:
-                    self._logger.error(
-                        f"UST Prices - Bad Status for {date}: {response.status_code}"
-                    )
+                    self._logger.error(f"UST Prices - Bad Status for {date}: {response.status_code}")
                     if response.status_code == 404:
                         if uid:
                             return date, df[cols_to_return], uid
                         return date, df[cols_to_return]
                     retries += 1
                     wait_time = backoff_factor * (2 ** (retries - 1))
-                    self._logger.debug(
-                        f"UST Prices - Throttled. Waiting for {wait_time} seconds before retrying..."
-                    )
+                    self._logger.debug(f"UST Prices - Throttled. Waiting for {wait_time} seconds before retrying...")
                     await asyncio.sleep(wait_time)
 
                 except Exception as e:
                     self._logger.error(f"UST Prices - Error for {date}: {e}")
                     retries += 1
                     wait_time = backoff_factor * (2 ** (retries - 1))
-                    self._logger.debug(
-                        f"UST Prices - Throttled. Waiting for {wait_time} seconds before retrying..."
-                    )
+                    self._logger.debug(f"UST Prices - Throttled. Waiting for {wait_time} seconds before retrying...")
                     await asyncio.sleep(wait_time)
 
             raise ValueError(f"UST Prices - Max retries exceeded for {date}")
@@ -151,9 +139,7 @@ class FedInvestDataFetcher(DataFetcherBase):
                 return date, pd.DataFrame(columns=cols_to_return), uid
             return date, pd.DataFrame(columns=cols_to_return)
 
-    async def _fetch_cusip_prices_fedinvest_with_semaphore(
-        self, semaphore, *args, **kwargs
-    ):
+    async def _fetch_cusip_prices_fedinvest_with_semaphore(self, semaphore, *args, **kwargs):
         async with semaphore:
             return await self._fetch_cusip_prices_fedinvest(*args, **kwargs)
 
@@ -223,9 +209,7 @@ class FedInvestDataFetcher(DataFetcherBase):
         set_cusips_as_index: Optional[bool] = False,
     ):
         date_str = date.strftime("%Y-%m-%d")
-        headers = self._github_headers(
-            path=f"/cleeclee123/CUSIP-Set/main/{date_str}.json"
-        )
+        headers = self._github_headers(path=f"/cleeclee123/CUSIP-Set/main/{date_str}.json")
         url = f"https://raw.githubusercontent.com/cleeclee123/CUSIP-Set/main/{date_str}.json"
         retries = 0
         cols_to_return_copy = cols_to_return.copy()
@@ -237,9 +221,7 @@ class FedInvestDataFetcher(DataFetcherBase):
                     res_json = response.json()
                     df = pd.DataFrame(res_json["data"])
                     if df.empty:
-                        self._logger.error(
-                            f"UST Prices GitHub - Data is Empty for {date}"
-                        )
+                        self._logger.error(f"UST Prices GitHub - Data is Empty for {date}")
                         if uid:
                             return date, None, uid
                         return date, None
@@ -248,13 +230,9 @@ class FedInvestDataFetcher(DataFetcherBase):
                     df["maturity_date"] = pd.to_datetime(df["maturity_date"])
 
                     if cusips:
-                        missing_cusips = [
-                            cusip for cusip in cusips if cusip not in df["cusip"].values
-                        ]
+                        missing_cusips = [cusip for cusip in cusips if cusip not in df["cusip"].values]
                         if missing_cusips:
-                            self._logger.warning(
-                                f"UST Prices Warning - The following CUSIPs are not found in the DataFrame: {missing_cusips}"
-                            )
+                            self._logger.warning(f"UST Prices Warning - The following CUSIPs are not found in the DataFrame: {missing_cusips}")
                     df = df[df["cusip"].isin(cusips)] if cusips else df
 
                     if cusip_ref_replacement_dict:
@@ -263,9 +241,7 @@ class FedInvestDataFetcher(DataFetcherBase):
                     if assume_otrs and "original_security_term" in df.columns:
                         df = df.sort_values(by=["issue_date"], ascending=False)
                         df = df.groupby("original_security_term").first().reset_index()
-                        cusip_to_term_dict = dict(
-                            zip(df["cusip"], df["original_security_term"])
-                        )
+                        cusip_to_term_dict = dict(zip(df["cusip"], df["original_security_term"]))
                         df["cusip"] = df["cusip"].replace(cusip_to_term_dict)
 
                     if set_cusips_as_index:
@@ -289,17 +265,13 @@ class FedInvestDataFetcher(DataFetcherBase):
                         return date, None
                     retries += 1
                     wait_time = backoff_factor * (2 ** (retries - 1))
-                    self._logger.debug(
-                        f"UST Prices GitHub - Throttled for {date}. Waiting for {wait_time} seconds before retrying..."
-                    )
+                    self._logger.debug(f"UST Prices GitHub - Throttled for {date}. Waiting for {wait_time} seconds before retrying...")
                     await asyncio.sleep(wait_time)
                 except Exception as e:
                     self._logger.error(f"UST Prices GitHub - Error for {date}: {e}")
                     retries += 1
                     wait_time = backoff_factor * (2 ** (retries - 1))
-                    self._logger.debug(
-                        f"UST Prices GitHub - Throttled for {date}. Waiting for {wait_time} seconds before retrying..."
-                    )
+                    self._logger.debug(f"UST Prices GitHub - Throttled for {date}. Waiting for {wait_time} seconds before retrying...")
                     await asyncio.sleep(wait_time)
 
             raise ValueError(f"UST Prices GitHub - Max retries exceeded for {date}")
@@ -310,9 +282,7 @@ class FedInvestDataFetcher(DataFetcherBase):
                 return date, None, uid
             return date, None
 
-    async def _fetch_cusip_prices_from_github_with_semaphore(
-        self, semaphore, *args, **kwargs
-    ):
+    async def _fetch_cusip_prices_from_github_with_semaphore(self, semaphore, *args, **kwargs):
         async with semaphore:
             return await self._fetch_cusip_prices_from_github(*args, **kwargs)
 
@@ -367,9 +337,7 @@ class FedInvestDataFetcher(DataFetcherBase):
         try:
             res = requests.get(
                 url,
-                headers=self._github_headers(
-                    path=f"/cleeclee123/CUSIP-Timeseries/main/historical_ct_yields_{side}_side.json"
-                ),
+                headers=self._github_headers(path=f"/cleeclee123/CUSIP-Timeseries/main/historical_ct_yields_{side}_side.json"),
                 proxies=self._proxies,
             )
             res.raise_for_status()
@@ -378,7 +346,7 @@ class FedInvestDataFetcher(DataFetcherBase):
             df = df[(df["Date"] >= start_date) & (df["Date"] <= end_date)]
             df = df.reset_index(drop=True)
             df.columns = ["Date", "CT2M", "CT3M", "CT6M", "CT1", "CT2", "CT3", "CT5", "CT7", "CT10", "CT20", "CT30"]
-            
+
             if tenors:
                 tenors = ["Date"] + tenors
                 return df[tenors]
@@ -409,9 +377,7 @@ class FedInvestDataFetcher(DataFetcherBase):
         try:
             res = await client.get(
                 url,
-                headers=self._github_headers(
-                    path=f"/cleeclee123/CUSIP-Timeseries/main/historical_ct_yields_{side}_side.json"
-                ),
+                headers=self._github_headers(path=f"/cleeclee123/CUSIP-Timeseries/main/historical_ct_yields_{side}_side.json"),
             )
             res.raise_for_status()
             df = pd.DataFrame(res.json())
@@ -444,9 +410,7 @@ class FedInvestDataFetcher(DataFetcherBase):
         try:
             while retries < max_retries:
                 url = f"https://raw.githubusercontent.com/cleeclee123/CUSIP-Timeseries/main/{cusip}.json"
-                headers = self._github_headers(
-                    path=f"/cleeclee123/CUSIP-Timeseries/main/{cusip}.json"
-                )
+                headers = self._github_headers(path=f"/cleeclee123/CUSIP-Timeseries/main/{cusip}.json")
                 try:
                     response = await client.get(url, headers=headers)
                     response.raise_for_status()
@@ -463,33 +427,23 @@ class FedInvestDataFetcher(DataFetcherBase):
                     return cusip, df
 
                 except httpx.HTTPStatusError as e:
-                    self._logger.error(
-                        f"UST Timeseries GitHub - Error for {cusip}: {e}"
-                    )
+                    self._logger.error(f"UST Timeseries GitHub - Error for {cusip}: {e}")
                     if response.status_code == 404:
                         if uid:
                             return cusip, None, uid
                         return cusip, None
                     retries += 1
                     wait_time = backoff_factor * (2 ** (retries - 1))
-                    self._logger.debug(
-                        f"UST Timeseries GitHub - Throttled for {cusip}. Waiting for {wait_time} seconds before retrying..."
-                    )
+                    self._logger.debug(f"UST Timeseries GitHub - Throttled for {cusip}. Waiting for {wait_time} seconds before retrying...")
                     await asyncio.sleep(wait_time)
                 except Exception as e:
-                    self._logger.error(
-                        f"UST Timeseries GitHub - Error for {cusip}: {e}"
-                    )
+                    self._logger.error(f"UST Timeseries GitHub - Error for {cusip}: {e}")
                     retries += 1
                     wait_time = backoff_factor * (2 ** (retries - 1))
-                    self._logger.debug(
-                        f"UST Timeseries GitHub - Throttled for {cusip}. Waiting for {wait_time} seconds before retrying..."
-                    )
+                    self._logger.debug(f"UST Timeseries GitHub - Throttled for {cusip}. Waiting for {wait_time} seconds before retrying...")
                     await asyncio.sleep(wait_time)
 
-            raise ValueError(
-                f"UST Timeseries GitHub - Max retries exceeded for {cusip}"
-            )
+            raise ValueError(f"UST Timeseries GitHub - Max retries exceeded for {cusip}")
 
         except Exception as e:
             self._logger.error(e)
@@ -497,9 +451,7 @@ class FedInvestDataFetcher(DataFetcherBase):
                 return cusip, None, uid
             return cusip, None
 
-    async def _fetch_cusip_timeseries_github_with_semaphore(
-        self, semaphore, *args, **kwargs
-    ):
+    async def _fetch_cusip_timeseries_github_with_semaphore(self, semaphore, *args, **kwargs):
         async with semaphore:
             return await self._fetch_cusip_timeseries_github(*args, **kwargs)
 
@@ -510,6 +462,9 @@ class FedInvestDataFetcher(DataFetcherBase):
         end_date: Optional[datetime] = None,
         max_concurrent_tasks: int = 64,
         max_keepalive_connections: int = 5,
+        to_df_col: Optional[str] = None,
+        use_dict_key_df_cols: Optional[bool] = False,
+        df_col_delimitter: Optional[str] = "-",
     ):
         async def build_tasks(
             client: httpx.AsyncClient,
@@ -538,10 +493,22 @@ class FedInvestDataFetcher(DataFetcherBase):
                 all_data = await build_tasks(client=client, cusips=cusips)
                 return all_data
 
-        results: List[Tuple[str, pd.DataFrame]] = asyncio.run(
-            run_fetch_all(cusips=cusips)
-        )
-        results_dict: Dict[str, pd.DataFrame] = {
-            dt: df for dt, df in results if dt is not None and df is not None
-        }
+        results: List[Tuple[str, pd.DataFrame]] = asyncio.run(run_fetch_all(cusips=cusips))
+        results_dict: Dict[str, pd.DataFrame] = {dt: df for dt, df in results if dt is not None and df is not None}
+
+        if to_df_col:
+            renamed_dfs = []
+            for key, df in results_dict.items():
+                temp_df = df[["Date", to_df_col]].copy()
+                if use_dict_key_df_cols:
+                    temp_df = temp_df.rename(columns={col: f"{key}" for col in temp_df.columns if col != "Date"})
+                else:
+                    temp_df = temp_df.rename(columns={col: f"{key}{df_col_delimitter}{col}" for col in temp_df.columns if col != "Date"})
+                renamed_dfs.append(temp_df)
+
+            from functools import reduce
+
+            merged_df = reduce(lambda left, right: pd.merge(left, right, on="Date", how="outer"), renamed_dfs)
+            return merged_df
+
         return results_dict

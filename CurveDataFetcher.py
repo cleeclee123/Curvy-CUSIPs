@@ -276,6 +276,7 @@ class CurveDataFetcher:
         fitted_curves: Optional[List[Tuple[str, str, Callable]] | List[Tuple[str, str, Callable, Callable]]] = None,
         max_concurrent_tasks: Optional[int] = 128,
         max_connections: Optional[int] = 64,
+        sorted_curve_set: Optional[bool] = False, 
     ) -> Tuple[Dict[datetime, pd.DataFrame], Dict[datetime, Dict[str, GeneralCurveInterpolator]]]:
         if calc_free_float:
             fetch_soma_holdings = True
@@ -419,6 +420,10 @@ class CurveDataFetcher:
                     )
 
                 curr_curve_set_df = merged_df.to_pandas()
+                if sorted_curve_set:
+                    curr_curve_set_df["sort_key"] = curr_curve_set_df["original_security_term"].apply(ust_sorter)
+                    curr_curve_set_df = curr_curve_set_df.sort_values(by=["sort_key", "time_to_maturity"]).drop(columns="sort_key").reset_index(drop=True)
+                
                 curveset_dict_df[curr_dt] = curr_curve_set_df
 
                 if fitted_curves:

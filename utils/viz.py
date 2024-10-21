@@ -11,14 +11,16 @@ import plotly.express as px
 import plotly.graph_objs as go
 import seaborn as sns
 import statsmodels.api as sm
+from plotly.subplots import make_subplots
 
 sns.set_style("whitegrid", {"grid.linestyle": "--"})
 
 import warnings
+
 warnings.simplefilter(action="ignore", category=FutureWarning)
 
 
-def plot_yields(
+def plot_timeseries(
     df: pd.DataFrame,
     y_cols: List[str],
     x_col="Date",
@@ -28,24 +30,67 @@ def plot_yields(
     custom_label_y=None,
     custom_title=None,
     date_subset_range: Annotated[List[datetime], 2] | None = None,
-    recessions: Annotated[List[List[datetime]], 2] = None,
+    plot_recessions=False,
     bar_plot=False,
+    dt_range_highlights: List[Tuple[datetime, datetime, str, str]] = None,
+    ohlc=False,
+    secondary_y_cols: Optional[List[str]] = None,
+    html_path: Optional[str] = None,
 ):
     copy_df = df.copy()
-    copy_df["Date"] = pd.to_datetime(copy_df["Date"])
+    date_col = "Date"
+
+    copy_df[date_col] = pd.to_datetime(copy_df[date_col])
     if date_subset_range:
-        copy_df = copy_df[(copy_df["Date"] >= date_subset_range[0]) & (copy_df["Date"] <= date_subset_range[1])]
+        copy_df = copy_df[(copy_df[date_col] >= date_subset_range[0]) & (copy_df[date_col] <= date_subset_range[1])]
     if flip:
         copy_df = copy_df.iloc[::-1]
 
-    fig = go.Figure()
-    for y_col in y_cols:
-        if bar_plot:
-            fig.add_trace(go.Bar(x=copy_df[x_col], y=copy_df[y_col], name=y_col, marker_color="black"))
-        else:
-            fig.add_trace(go.Scatter(x=copy_df[x_col], y=copy_df[y_col], mode="lines", name=y_col))
+    if secondary_y_cols:
+        fig = make_subplots(specs=[[{"secondary_y": True}]])
+    else:
+        fig = go.Figure()
 
-    if recessions:
+    colors = ["white"] + px.colors.qualitative.Plotly
+    for i, y_col in enumerate(y_cols):
+        if bar_plot:
+            fig.add_trace(
+                go.Bar(x=copy_df[x_col], y=copy_df[y_col], name=y_col, marker_color="black"),
+                secondary_y=y_col in secondary_y_cols if secondary_y_cols else None,
+            )
+        elif ohlc:
+            fig.add_trace(
+                go.Ohlc(
+                    x=df[f"Date"],
+                    open=df[f"{y_col}_Open"],
+                    high=df[f"{y_col}_High"],
+                    low=df[f"{y_col}_Low"],
+                    close=df[f"{y_col}_Close"],
+                    name=y_col,
+                    increasing_line_color=colors[i],
+                    decreasing_line_color=colors[i],
+                ),
+                secondary_y=y_col in secondary_y_cols if secondary_y_cols else None,
+            )
+            fig.update(layout_xaxis_rangeslider_visible=False)
+        else:
+            fig.add_trace(
+                go.Scatter(x=copy_df[x_col], y=copy_df[y_col], mode="lines", name=y_col),
+                secondary_y=y_col in secondary_y_cols if secondary_y_cols else None,
+            )
+
+    if plot_recessions:
+        recessions = [
+            [datetime(1961, 4, 1), datetime(1961, 2, 1)],
+            [datetime(1969, 12, 1), datetime(1970, 11, 1)],
+            [datetime(1973, 11, 1), datetime(1975, 3, 1)],
+            [datetime(1980, 1, 1), datetime(1980, 7, 1)],
+            [datetime(1981, 7, 1), datetime(1982, 11, 1)],
+            [datetime(1990, 7, 1), datetime(1991, 3, 1)],
+            [datetime(2001, 3, 1), datetime(2001, 11, 1)],
+            [datetime(2007, 12, 1), datetime(2009, 6, 1)],
+            [datetime(2020, 2, 1), datetime(2020, 4, 1)],
+        ]
         if date_subset_range:
             start_plot_range, end_plot_range = min(date_subset_range), max(date_subset_range)
         else:
@@ -63,9 +108,28 @@ def plot_yields(
                     line_width=0,
                 )
 
+    if dt_range_highlights:
+        for highlight_props in dt_range_highlights:
+            start_date, end_date, color, title = highlight_props
+            fig.add_vrect(
+                x0=start_date,
+                x1=end_date,
+                fillcolor=color,
+                opacity=0.3,
+                layer="below",
+                line_width=0,
+                annotation_text=title,
+                annotation_position="top left",
+                annotation_textangle=90,
+            )
+
+    if secondary_y_cols:
+        fig.update_yaxes(title=custom_label_y or ", ".join(secondary_y_cols), secondary_y=True)
+        fig.update_yaxes(title=custom_label_y or ", ".join(list(set(y_cols) - set(secondary_y_cols))), secondary_y=False)
+    else: 
+        fig.update_yaxes(title=custom_label_y or ", ".join(y_cols))
     fig.update_layout(
         xaxis_title=custom_label_x or x_col,
-        yaxis_title=custom_label_y or ", ".join(y_cols),
         xaxis=dict(nticks=max_ticks),
         title=custom_title or "Yield Plot",
         showlegend=True,
@@ -86,6 +150,8 @@ def plot_yields(
             ]
         }
     )
+    if html_path:
+        fig.write_html(html_path)
 
 
 def plot_yield_curve_date_range(
@@ -163,7 +229,18 @@ def plot_yield_curve_date_range(
     )
 
 
-def run_basic_linear_regression(x_series: pd.Series, y_series: pd.Series, x_label, y_label, title: Optional[str] = None):
+def run_basic_linear_regression(
+    x_series: pd.Series, 
+    y_series: pd.Series, 
+    x_label: Optional[str] = None, 
+    y_label: Optional[str] = None, 
+    title: Optional[str] = None,
+):
+    if not x_label:
+        x_label = x_series.name
+    if not y_label:
+        y_label = y_series.name
+        
     Y = y_series
     X = x_series
     X = sm.add_constant(X)
@@ -184,7 +261,7 @@ def run_basic_linear_regression(x_series: pd.Series, y_series: pd.Series, x_labe
     plt.ylabel(x_label)
     plt.xlabel(y_label)
     plt.title(title or f"{y_label} Regressed on {x_label}")
-    equation_text = f"y = {intercept:.3f} + {slope:.3f}x \n R² = {r_squared:.3f} \n SE = {results.bse["const"]:.3f}"
+    equation_text = f"y = {intercept:.3f} + {slope:.3f}x\nR² = {r_squared:.3f}\nSE = {results.bse["const"]:.3f}"
     plt.plot([], [], " ", label=f"{equation_text}")
 
     plt.legend(fontsize="x-large")
@@ -194,9 +271,23 @@ def run_basic_linear_regression(x_series: pd.Series, y_series: pd.Series, x_labe
     return results
 
 
-def run_basic_linear_regression_df(df: pd.DataFrame, x_col: str, y_col: str, title: Optional[str] = None):
+def run_basic_linear_regression_df(
+    df: pd.DataFrame, 
+    x_col: str, 
+    y_col: str, 
+    title: Optional[str] = None, 
+    date_color_bar: Optional[bool] = False, 
+    on_diff: Optional[bool] = False,
+):
     if x_col not in df.columns or y_col not in df.columns:
         raise Exception(f"{x_col} or {y_col} not in df cols")
+    
+    df = df[["Date"] + [x_col, y_col]].copy()
+    if on_diff:
+        date_col = df["Date"]
+        df = df[[x_col, y_col]].diff()
+        df["Date"] = date_col
+    df = df.dropna()
 
     Y = df[y_col]
     X = df[x_col]
@@ -209,22 +300,32 @@ def run_basic_linear_regression_df(df: pd.DataFrame, x_col: str, y_col: str, tit
     slope = results.params[1]
     r_squared = results.rsquared
     p_value = results.pvalues[1] if len(results.pvalues) > 1 else None
-    slope_name = results.params.drop('const').index[0]
+    slope_name = results.params.drop("const").index[0]
 
     plt.figure(figsize=(20, 10))
-    plt.scatter(df[x_col], df[y_col])
+    
+    if date_color_bar:
+        df['date_numeric'] = (df['Date'] - df['Date'].min()).dt.total_seconds()
+        scatter = plt.scatter(df[x_col], df[y_col], c=df['date_numeric'], cmap='viridis')
+        cbar = plt.colorbar(scatter)
+        cbar.set_label('Date')
+        cbar_ticks = np.linspace(df['date_numeric'].min(), df['date_numeric'].max(), num=10)
+        cbar.set_ticks(cbar_ticks)
+        cbar.set_ticklabels(pd.to_datetime(cbar_ticks, unit='s', origin=df['Date'].min()).strftime('%Y-%m-%d'))
+    else:
+        plt.scatter(df[x_col], df[y_col])
+    
     most_recent = df["Date"].iloc[-1]
     plt.scatter(
         df[x_col].iloc[-1],
         df[y_col].iloc[-1],
-        color="purple",
+        color="purple", 
         s=100,
         label=f"Most Recent: {most_recent}",
     )
-
+    
     regression_line = intercept + slope * df[x_col]
     plt.plot(df[x_col], regression_line, color="red")
-
     plt.xlabel(x_col)
     plt.ylabel(y_col)
     plt.title(title or f"{y_col} Regressed on {x_col}", fontdict={"fontsize": "x-large"})
@@ -237,40 +338,38 @@ def run_basic_linear_regression_df(df: pd.DataFrame, x_col: str, y_col: str, tit
     return results
 
 
-def run_multiple_linear_regression_df(
-    df: pd.DataFrame, x_cols: List[str], y_col: str, title: Optional[str] = None, verbose=False
-):
+def run_multiple_linear_regression_df(df: pd.DataFrame, x_cols: List[str], y_col: str, title: Optional[str] = None, verbose=False):
     df = df[x_cols + [y_col]].copy()
     df = df.dropna()
-    
-    if verbose:  
+
+    if verbose:
         print(df)
-    
+
     for col in x_cols + [y_col]:
         if col not in df.columns:
             raise Exception(f"{col} not in df columns")
 
     Y = df[y_col]
     X = df[x_cols]
-    X = sm.add_constant(X)  
+    X = sm.add_constant(X)
 
     model = sm.OLS(Y, X)
     results = model.fit()
     print(results.summary())
 
-    intercept = results.params['const']
-    slopes = results.params.drop('const')
+    intercept = results.params["const"]
+    slopes = results.params.drop("const")
     r_squared = results.rsquared
     adj_r_squared = results.rsquared_adj
 
     Y_pred = results.fittedvalues
     residuals = results.resid
-    
+
     plt.figure(figsize=(20, 10))
     plt.scatter(Y_pred, Y)
-    plt.xlabel('Predicted Values')
-    plt.ylabel('Actual Values')
-    plt.title('Actual vs Predicted')
+    plt.xlabel("Predicted Values")
+    plt.ylabel("Actual Values")
+    plt.title("Actual vs Predicted")
     plt.grid(True)
 
     equation_text = f"y = {intercept:.3f}"
@@ -278,21 +377,21 @@ def run_multiple_linear_regression_df(
         coef = slopes[col]
         equation_text += f" + {coef:.3f}*{col}"
     equation_text += f"\nR² = {r_squared:.3f}\nAdjusted R² = {adj_r_squared:.3f}"
-    plt.plot([], [], ' ', label=equation_text)
-    plt.legend(fontsize='x-large')
+    plt.plot([], [], " ", label=equation_text)
+    plt.legend(fontsize="x-large")
     plt.show()
 
     # Plot Residuals vs Predicted
     plt.figure(figsize=(20, 10))
     plt.scatter(Y_pred, residuals)
-    plt.axhline(y=0, color='red', linestyle='--')
-    plt.xlabel('Predicted Values')
-    plt.ylabel('Residuals')
-    plt.title('Residuals vs Predicted')
+    plt.axhline(y=0, color="red", linestyle="--")
+    plt.xlabel("Predicted Values")
+    plt.ylabel("Residuals")
+    plt.title("Residuals vs Predicted")
     plt.grid(True)
     plt.show()
 
-    return results 
+    return results
 
 
 def plot_residuals_timeseries(
@@ -315,7 +414,7 @@ def plot_residuals_timeseries(
     p_value = results.pvalues[1] if len(results.pvalues) > 1 else None
     dependent_variable = results.model.endog_names
     independent_variables = results.model.exog_names[1]
-    slope_name = results.params.drop('const').index[0]
+    slope_name = results.params.drop("const").index[0]
 
     if p_value is not None:
         title = f"Residuals of {dependent_variable} Regressed on {independent_variables} Over Time\n"
@@ -324,24 +423,24 @@ def plot_residuals_timeseries(
 
     plt.figure(figsize=(20, 10))
     plt.plot(df[date_col], residuals if not plot_zscores else zscores, linestyle="-", color="blue")
-    # plt.axhline(y=0, color="red", linestyle="--")
+    plt.axhline(y=0, color="red", linestyle="--")
     equation_text = f"y = {intercept:.3f} + {slope:.3f}*{slope_name}\nR² = {r_squared:.3f}\nSE = {results.bse["const"]:.3f}\np-value ({slope_name}) = {p_value:.3e}"
     plt.plot([], [], " ", label=f"{equation_text}")
-    
+
     if stds:
-        resid_std = tstd(residuals) 
-        resid_mean = np.mean(residuals) 
+        resid_std = tstd(residuals)
+        resid_mean = np.mean(residuals)
         plt.axhline(resid_mean, linestyle="--", color="red", label=f"Resid Mean: {resid_mean}")
         for std in stds:
             curr = plt.axhline(resid_mean + resid_std * std, linestyle="--", label=f"+/- {std} STD")
             plt.axhline(resid_mean + resid_std * -1 * std, linestyle="--", color=curr.get_color())
-    
+
     if rolling_stds:
         for std, window in rolling_stds:
             rolling_resid_std = pd.Series(residuals).rolling(window).std()
             curr = plt.plot(df[date_col], rolling_resid_std * std, linestyle="--", label=f"+/- {std} {window}d Rolling STD")
             plt.plot(df[date_col], -rolling_resid_std * std, linestyle="--", color=curr[0].get_color())
-    
+
     plt.legend(fontsize="x-large")
     plt.xlabel("Date")
     plt.ylabel("Residuals" if not plot_zscores else "Z-Scores")
@@ -349,7 +448,7 @@ def plot_residuals_timeseries(
     plt.grid(True)
     plt.show()
 
-    
+
 def plot_mr_residuals_timeseries(
     df: pd.DataFrame,
     results: sm.regression.linear_model.RegressionResultsWrapper,
@@ -357,8 +456,8 @@ def plot_mr_residuals_timeseries(
     plot_zscores: Optional[bool] = False,
 ):
     df = df.copy()
-    df = df.dropna() 
-    
+    df = df.dropna()
+
     if date_col not in df.columns:
         raise Exception(f"{date_col} not in df columns")
 
@@ -368,8 +467,8 @@ def plot_mr_residuals_timeseries(
 
     r_squared = results.rsquared
     adj_r_squared = results.rsquared_adj
-    intercept = results.params['const']
-    slopes = results.params.drop('const')
+    intercept = results.params["const"]
+    slopes = results.params.drop("const")
     p_values = results.pvalues
     dependent_variable = results.model.endog_names
     independent_variables = results.model.exog_names[1:]  # Exclude 'const'
@@ -403,47 +502,41 @@ def plot_mr_residuals_timeseries(
 
 def run_rolling_regression_df(df: pd.DataFrame, x_col: str, y_col: str, window: int, title: Optional[str] = None):
     df = df.copy()
-    
+
     if x_col not in df.columns or y_col not in df.columns:
         raise Exception(f"{x_col} or {y_col} not in df cols")
 
     def calculate_r_squared(x, y):
         Y = y
-        X = x 
-        X = sm.add_constant(X)  
+        X = x
+        X = sm.add_constant(X)
         model = sm.OLS(Y, X)
         results = model.fit()
-        r_squared = results.rsquared 
+        r_squared = results.rsquared
         return r_squared
 
     rolling_r_squared = []
     for rolling_df in df[[x_col, y_col]].rolling(window=window):
         if len(rolling_df.index) < window:
             rolling_r_squared.append(np.nan)
-        else: 
+        else:
             r_squared = calculate_r_squared(rolling_df[x_col], rolling_df[y_col])
-            rolling_r_squared.append(r_squared) 
-        
-    plt.figure(figsize=(20, 10))
-    plt.plot(df['Date'], rolling_r_squared, label=f'Rolling R-squared (window={window})')
-    
-    most_recent = df["Date"].iloc[-1]
-    plt.scatter(
-        most_recent,
-        rolling_r_squared[-1],
-        color="purple",
-        s=100,
-        label=f"Most Recent: {most_recent}, R² = {rolling_r_squared[-1]}"
-    )
+            rolling_r_squared.append(r_squared)
 
-    plt.xlabel('Date')
-    plt.ylabel('R-squared')
+    plt.figure(figsize=(20, 10))
+    plt.plot(df["Date"], rolling_r_squared, label=f"Rolling R-squared (window={window})")
+
+    most_recent = df["Date"].iloc[-1]
+    plt.scatter(most_recent, rolling_r_squared[-1], color="purple", s=100, label=f"Most Recent: {most_recent}, R² = {rolling_r_squared[-1]}")
+
+    plt.xlabel("Date")
+    plt.ylabel("R-squared")
     plt.title(title or f"Rolling R-squared: {y_col} Regressed on {x_col}", fontdict={"fontsize": "x-large"})
-    
+
     mean_r_squared = np.nanmean(rolling_r_squared)
     std_r_squared = np.nanstd(rolling_r_squared)
     stats_text = f"Mean R² = {mean_r_squared:.3f}\nStd R² = {std_r_squared:.3f}"
-    plt.plot([], [], ' ', label=stats_text)
+    plt.plot([], [], " ", label=stats_text)
 
     plt.legend(fontsize="x-large")
     plt.grid(True)
@@ -644,7 +737,7 @@ def plot_usts(
                     name=label,
                 )
             )
-        
+
         zero_spline, label = zero_curves[0]
         residuals = curve_set_df[ytm_col].to_numpy() - zero_spline(curve_set_df[ttm_col].to_numpy())
         plt.figure(figsize=(20, 10))
