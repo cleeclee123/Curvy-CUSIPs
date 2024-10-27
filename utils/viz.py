@@ -4,9 +4,13 @@ from typing import Annotated, List, Optional, Tuple, Callable
 import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
+import numpy.typing as npt
 from scipy.optimize import newton
 from scipy.interpolate import UnivariateSpline
-from scipy.stats import zscore, tstd
+from scipy.stats import zscore, tstd, linregress
+from scipy import stats
+from scipy.odr import ODR, Model, Data, RealData
+from types import SimpleNamespace
 import plotly.express as px
 import plotly.graph_objs as go
 import seaborn as sns
@@ -126,7 +130,7 @@ def plot_timeseries(
     if secondary_y_cols:
         fig.update_yaxes(title=custom_label_y or ", ".join(secondary_y_cols), secondary_y=True)
         fig.update_yaxes(title=custom_label_y or ", ".join(list(set(y_cols) - set(secondary_y_cols))), secondary_y=False)
-    else: 
+    else:
         fig.update_yaxes(title=custom_label_y or ", ".join(y_cols))
     fig.update_layout(
         xaxis_title=custom_label_x or x_col,
@@ -230,17 +234,17 @@ def plot_yield_curve_date_range(
 
 
 def run_basic_linear_regression(
-    x_series: pd.Series, 
-    y_series: pd.Series, 
-    x_label: Optional[str] = None, 
-    y_label: Optional[str] = None, 
+    x_series: pd.Series,
+    y_series: pd.Series,
+    x_label: Optional[str] = None,
+    y_label: Optional[str] = None,
     title: Optional[str] = None,
 ):
     if not x_label:
         x_label = x_series.name
     if not y_label:
         y_label = y_series.name
-        
+
     Y = y_series
     X = x_series
     X = sm.add_constant(X)
@@ -272,16 +276,20 @@ def run_basic_linear_regression(
 
 
 def run_basic_linear_regression_df(
-    df: pd.DataFrame, 
-    x_col: str, 
-    y_col: str, 
-    title: Optional[str] = None, 
-    date_color_bar: Optional[bool] = False, 
+    df: pd.DataFrame,
+    x_col: str,
+    y_col: str,
+    title: Optional[str] = None,
+    plot_most_recent: Optional[bool] = False,
+    date_color_bar: Optional[bool] = False,
     on_diff: Optional[bool] = False,
+    run_tls: Optional[bool] = False,
+    run_gls: Optional[bool] = False,
+    run_wls: Optional[bool | npt.ArrayLike] = None,
 ):
     if x_col not in df.columns or y_col not in df.columns:
         raise Exception(f"{x_col} or {y_col} not in df cols")
-    
+
     df = df[["Date"] + [x_col, y_col]].copy()
     if on_diff:
         date_col = df["Date"]
@@ -289,47 +297,110 @@ def run_basic_linear_regression_df(
         df["Date"] = date_col
     df = df.dropna()
 
-    Y = df[y_col]
+    y = df[y_col]
     X = df[x_col]
     X = sm.add_constant(X)
-    model = sm.OLS(Y, X)
-    results = model.fit()
-    print(results.summary())
+    
+    regression_type = "OLS"
+    
+    if run_tls:
+        regression_type = "TLS"
+        def _linear_f_no_constant(beta: np.array, x_variable: np.array) -> np.array:
+            _, b = beta[0], beta[1:]
+            b.shape = (b.shape[0], 1)
+            return (x_variable * b).sum(axis=0)
 
-    intercept = results.params[0]
-    slope = results.params[1]
-    r_squared = results.rsquared
-    p_value = results.pvalues[1] if len(results.pvalues) > 1 else None
-    slope_name = results.params.drop("const").index[0]
+        linear = Model(_linear_f_no_constant)
+        mydata = RealData(X.T, y)
+        myodr = ODR(mydata, linear, beta0=np.ones(X.shape[1] + 1))
+        out = myodr.run()
+        print(out.pprint())
+
+        hedge_ratios = out.beta[1:]  
+        residuals = y - (X * hedge_ratios).sum(axis=1)
+        
+        x = df[x_col].to_numpy().flatten()
+        y = df[y_col].to_numpy().flatten()
+        
+        intercept = out.beta[1]
+        slope = out.beta[-1]
+        sd_intercept = out.sd_beta[1]
+        sd_slope = out.sd_beta[0]
+        df_resid = len(x) - 2
+        results = SimpleNamespace(
+            params=pd.Series([intercept, slope], index=['const', x_col]),
+            bse=pd.Series([sd_intercept, sd_slope], index=['const', x_col]),
+            pvalues=pd.Series(
+                [2 * (1 - stats.t.cdf(np.abs(intercept / sd_intercept), df=df_resid)), 
+                 2 * (1 - stats.t.cdf(np.abs(slope / sd_slope), df=df_resid))], index=['const', x_col]),
+            rsquared=1 - np.sum((y - (slope * x + intercept))**2) / np.sum((y - np.mean(y))**2),
+            resid=residuals,
+            model=SimpleNamespace(**{"endog_names": y_col, "exog_names": ["", x_col]})
+        )
+        
+        intercept = results.params[0]
+        slope = results.params[1]
+        r_squared = results.rsquared
+        p_value = results.pvalues[1] if len(results.pvalues) > 1 else None
+        slope_name = results.params.drop("const").index[0]
+        se_intercept = results.bse[0]
+        se_slope = results.bse[1]
+        
+    else:
+        if run_gls:
+            regression_type = "GLS"
+            model = sm.GLS(y, X)
+        elif run_wls:
+            regression_type = "WLS"
+            model = sm.WLS(y, X, weights=run_wls)
+        else:
+            model = sm.OLS(y, X)
+        
+        results = model.fit()
+        print(results.summary())
+
+        intercept = results.params[0]
+        slope = results.params[1]
+        r_squared = results.rsquared
+        p_value = results.pvalues[1] if len(results.pvalues) > 1 else None
+        slope_name = results.params.drop("const").index[0]
+        se_intercept = results.bse[0]
+        se_slope = results.bse[1]
 
     plt.figure(figsize=(20, 10))
-    
+
     if date_color_bar:
-        df['date_numeric'] = (df['Date'] - df['Date'].min()).dt.total_seconds()
-        scatter = plt.scatter(df[x_col], df[y_col], c=df['date_numeric'], cmap='viridis')
+        df["date_numeric"] = (df["Date"] - df["Date"].min()).dt.total_seconds()
+        scatter = plt.scatter(df[x_col], df[y_col], c=df["date_numeric"], cmap="viridis")
         cbar = plt.colorbar(scatter)
-        cbar.set_label('Date')
-        cbar_ticks = np.linspace(df['date_numeric'].min(), df['date_numeric'].max(), num=10)
+        cbar.set_label("Date")
+        cbar_ticks = np.linspace(df["date_numeric"].min(), df["date_numeric"].max(), num=10)
         cbar.set_ticks(cbar_ticks)
-        cbar.set_ticklabels(pd.to_datetime(cbar_ticks, unit='s', origin=df['Date'].min()).strftime('%Y-%m-%d'))
+        cbar.set_ticklabels(pd.to_datetime(cbar_ticks, unit="s", origin=df["Date"].min()).strftime("%Y-%m-%d"))
     else:
         plt.scatter(df[x_col], df[y_col])
-    
-    most_recent = df["Date"].iloc[-1]
-    plt.scatter(
-        df[x_col].iloc[-1],
-        df[y_col].iloc[-1],
-        color="purple", 
-        s=100,
-        label=f"Most Recent: {most_recent}",
-    )
-    
+
+    if plot_most_recent:
+        most_recent = df["Date"].iloc[-1]
+        plt.scatter(
+            df[x_col].iloc[-1],
+            df[y_col].iloc[-1],
+            color="orange",
+            s=100,
+            label=f"Most Recent: {most_recent}",
+        )
+
     regression_line = intercept + slope * df[x_col]
     plt.plot(df[x_col], regression_line, color="red")
-    plt.xlabel(x_col)
-    plt.ylabel(y_col)
-    plt.title(title or f"{y_col} Regressed on {x_col}", fontdict={"fontsize": "x-large"})
-    equation_text = f"y = {intercept:.3f} + {slope:.3f}*{slope_name}\nR² = {r_squared:.3f}\nSE = {results.bse["const"]:.3f}\np-value ({slope_name}) = {p_value:.3e}"
+    plt.xlabel(x_col if not on_diff else f"Δ{x_col}")
+    plt.ylabel(y_col if not on_diff else f"Δ{y_col}")
+    plt.title(title or f"{regression_type} - {y_col} Regressed on {x_col}" if not on_diff else f"{regression_type} - Δ{y_col} Regressed on Δ{x_col}", fontdict={"fontsize": "x-large"})
+    equation_text = (
+        f"y = {intercept:.3f} + {slope:.3f}*{slope_name}\n"
+        f"R² = {r_squared:.3f}\n"
+        f"SE (Intercept) = {se_intercept:.3f}, SE ({slope_name}) = {se_slope:.3f}\n"
+        f"p-value ({slope_name}) = {p_value:.3e}"
+    )
     plt.plot([], [], " ", label=f"{equation_text}")
     plt.legend(fontsize="x-large")
     plt.grid(True)
@@ -400,6 +471,7 @@ def plot_residuals_timeseries(
     date_col: str = "Date",
     plot_zscores: Optional[bool] = False,
     stds: Optional[List[int]] = None,
+    is_on_diff: Optional[bool] = False,
     rolling_stds: Optional[List[Tuple[int, int]]] = None,
 ):
     residuals = results.resid
@@ -407,6 +479,10 @@ def plot_residuals_timeseries(
 
     if date_col not in df.columns:
         raise Exception(f"{date_col} not in df columns")
+
+    if is_on_diff:
+        df = df.copy()
+        df = df.iloc[1:]
 
     r_squared = results.rsquared
     intercept = results.params[0]

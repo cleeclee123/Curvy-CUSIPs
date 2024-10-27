@@ -1,446 +1,29 @@
-from CurveDataFetcher import CurveDataFetcher
-from CurveBuilder import calc_ust_metrics, calc_ust_impl_spot_n_fwd_curve
-
+import warnings
 from datetime import datetime, timedelta
-from typing import Annotated, Callable, List, Optional, Tuple, Dict
-from termcolor import colored
-import numpy.typing as npt
+from typing import Annotated, Callable, Dict, List, Optional, Tuple
 
-import ujson as json
-import scipy
 import matplotlib.pyplot as plt
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
-import seaborn as sns
-import statsmodels.api as sm
-from scipy.stats import tstd, zscore, linregress
-from scipy.odr import ODR, Model, RealData, Data, Output
-from sklearn.preprocessing import StandardScaler
-from sklearn.decomposition import PCA
-
 import plotly.express as px
 import plotly.graph_objects as go
+import scipy
+import seaborn as sns
+import statsmodels.api as sm
+import ujson as json
+from scipy.odr import ODR, Data, Model, Output, RealData
+from scipy.optimize import minimize
+from scipy.stats import linregress, tstd, zscore
+from sklearn.decomposition import PCA
+from sklearn.linear_model import LinearRegression
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from termcolor import colored
 
-
-def ols_hedge_ratio(
-    df: pd.DataFrame,
-    x_cols: List[str],
-    y_col: str,
-    run_on_changes: Optional[bool] = False,
-    last_n_day_regressions: Optional[List[int]] = None,
-    show_last_n_day_points: Optional[bool] = False,
-):
-    df = df[["Date"] + x_cols + [y_col]].copy()
-    if run_on_changes:
-        date_col = df["Date"]
-        df = df[x_cols + [y_col]].diff()
-        df["Date"] = date_col
-    df = df.dropna()
-
-    if not last_n_day_regressions:
-        last_n_day_regressions = [-1]
-    else:
-        last_n_day_regressions.append(-1)
-
-    regressions_results: Dict[int, pd.DataFrame | sm.regression.linear_model.RegressionResultsWrapper | int | float | str] = {}
-    for last_n_days in last_n_day_regressions:
-        curr_df = df.tail(last_n_days)
-
-        Y = curr_df[y_col]
-        X = curr_df[x_cols]
-
-        X = sm.add_constant(X)
-        model = sm.OLS(Y, X)
-        results = model.fit()
-        print(
-            colored(f"Regression Result for Last {last_n_days} Days:", "green")
-            if last_n_days != -1
-            else colored("Regression Results - Entire Dateset:\n", "green")
-        )
-        print(results.summary())
-        print("\n\n")
-
-        intercept = results.params["const"]
-        slope1 = results.params[x_cols[0]]
-        r_squared = results.rsquared
-        adj_r_squared = results.rsquared_adj
-
-        slopes = results.params
-        equation_text = f"y = {intercept:.3f}" if len(x_cols) == 1 else f"y = {slopes["const"]:.3f}"
-        for col in slopes.index:
-            if col != "const":
-                coef = slopes[col]
-                equation_text += f" + {coef:.3f}*{col}"
-
-        if len(x_cols) == 1:
-            equation_text_with_r2 = equation_text + f"<br>R² = {r_squared:.3f}"
-        if len(x_cols) == 2:
-            equation_text_with_r2 = equation_text + f"<br>R² = {r_squared:.3f}, Adjusted R² = {adj_r_squared:.3f}"
-
-        curr_title = (
-            f"{y_col} Regressed on {x_cols}<br>{equation_text_with_r2}"
-            if not run_on_changes
-            else f"Changes in {y_col} Regressed on Changes in {x_cols}<br>{equation_text_with_r2}<br>"
-        )
-
-        regressions_results[last_n_days] = {
-            "df": curr_df.copy(),
-            "results": results,
-            "intercept": intercept,
-            "slopes": slopes,
-            "slope1": slope1,
-            "r_squared": r_squared,
-            "adj_r_squared": adj_r_squared,
-            "equation_text": equation_text,
-            "equation_text_with_r2": equation_text_with_r2,
-            "curr_title": curr_title,
-        }
-
-    if len(x_cols) == 1:
-        x_min = df[x_cols[0]].min()
-        x_max = df[x_cols[0]].max()
-        x_range = np.linspace(x_min, x_max, 100)
-
-        fig = go.Figure()
-        for i, (last_n_days, regressions_result) in enumerate(regressions_results.items()):
-            curr_df = regressions_result["df"]
-            intercept = regressions_result["intercept"]
-            slope = regressions_result["slopes"][x_cols[0]]
-            curr_title = regressions_result["curr_title"]
-            y_range = intercept + slope * x_range
-
-            fig.add_trace(
-                go.Scatter(
-                    x=x_range,
-                    y=y_range,
-                    mode="lines",
-                    name=(
-                        f'{regressions_result["equation_text_with_r2"]}, Last N: {last_n_days}'
-                        if last_n_days != -1
-                        else regressions_result["equation_text_with_r2"]
-                    ),
-                    line=dict(width=3),
-                )
-            )
-            if show_last_n_day_points or last_n_days == -1:
-                fig.add_trace(
-                    go.Scatter(
-                        x=curr_df[x_cols[0]],
-                        y=curr_df[y_col],
-                        mode="markers",
-                        name=f"Data (Last {last_n_days} days)" if last_n_days != -1 else "Data (Entire Dataset)",
-                        hovertext=[
-                            f"Date: {row['Date']}<br>{x_cols[0]}: {row[x_cols[0]]:.4f}<br>{y_col}: {row[y_col]:.4f}" for _, row in curr_df.iterrows()
-                        ],
-                        hoverinfo="text",
-                        opacity=0.7,
-                    )
-                )
-
-        fig.update_layout(
-            title=curr_title,
-            xaxis_title=x_cols[0],
-            yaxis_title=y_col,
-            template="plotly_dark",
-            height=900,
-            showlegend=True,
-        )
-        fig.update_xaxes(showspikes=True, spikecolor="white", spikesnap="cursor", spikemode="across")
-        fig.update_yaxes(showspikes=True, spikecolor="white", spikesnap="cursor", spikethickness=0.5)
-        fig.show()
-
-    if len(x_cols) == 2:
-        mesh_size = 0.1  # Adjust mesh size for smoother or coarser grid
-        margin = 0
-        x_min, x_max = X[x_cols[0]].min() - margin, X[x_cols[0]].max() + margin
-        y_min, y_max = X[x_cols[1]].min() - margin, X[x_cols[1]].max() + margin
-        x_range = np.arange(x_min, x_max, mesh_size)
-        y_range = np.arange(y_min, y_max, mesh_size)
-        xx, yy = np.meshgrid(x_range, y_range)
-
-        # fig = px.scatter_3d(df, x=x_cols[0], y=x_cols[1], z=y_col)
-        # fig.add_traces(go.Surface(x=x_range, y=y_range, z=z_pred, name="OLS Regression Plane", opacity=0.7, showscale=False))
-        fig = go.Figure()
-        surface_names = []
-        for i, (last_n_days, regressions_result) in enumerate(regressions_results.items()):
-            curr_df: pd.DataFrame = regressions_result["df"]
-            curr_z_pred = regressions_result["intercept"] + regressions_result["slope1"] * xx + regressions_result["results"].params[x_cols[1]] * yy
-            scatter = go.Scatter3d(
-                x=curr_df[x_cols[0]],
-                y=curr_df[x_cols[1]],
-                z=curr_df[y_col],
-                mode="markers",
-                marker=dict(size=4, color=px.colors.qualitative.Plotly[i]),
-                name=(
-                    f'{regressions_result["equation_text_with_r2"]}, Last N: {last_n_days}'
-                    if last_n_days != -1
-                    else regressions_result["equation_text_with_r2"]
-                ),
-                hovertext=[
-                    f"Date: {row["Date"]}<br>"
-                    + f"{x_cols[0]}: {row[x_cols[0]]:.4f}<br>"
-                    + f"{y_col}: {row[y_col]:.4f}<br>"
-                    + f"{x_cols[1]}: {row[x_cols[1]]:.4f}"
-                    for _, row in curr_df.iterrows()
-                ],
-                hoverinfo="text",
-            )
-            surface_name = f"Last {last_n_days} Days - OLS Regression Plane" if not last_n_days == -1 else "Entire Timeframe - OLS Regression Plane"
-            surface_names.append(surface_name)
-            surface = go.Surface(
-                x=x_range,
-                y=y_range,
-                z=curr_z_pred,
-                name=surface_name,
-                opacity=0.7,
-                showscale=False,
-                colorscale=px.colors.named_colorscales()[i],
-            )
-            # dummy scatter trace for the surface legend entry
-            dummy_surface = go.Scatter3d(
-                x=[None],
-                y=[None],
-                z=[None],
-                mode="markers",
-                marker=dict(size=10, color=px.colors.qualitative.Plotly[i], symbol="square"),
-                name=surface_name,
-                showlegend=True,
-            )
-            fig.add_trace(scatter)
-            fig.add_trace(surface)
-            fig.add_trace(dummy_surface)
-
-        button_all = dict(
-            label="Show All",
-            method="update",
-            args=[{"visible": [True] * len(x_cols) * 3}],
-        )
-        button_hide = dict(
-            label="Hide All",
-            method="update",
-            args=[{"visible": [False] * len(x_cols) * 3}],
-        )
-
-        surface_buttons = []
-        for i, (last_n_days, regressions_result) in enumerate(regressions_results.items()):
-            visible_props = [False] * 3 * len(surface_names)
-            visible_props[i * 3 + 0] = True
-            visible_props[i * 3 + 1] = True
-            visible_props[i * 3 + 2] = True
-            surface_buttons.append(
-                dict(
-                    label=surface_names[i],
-                    method="update",
-                    args=[{"visible": visible_props}, {"title": surface_names[i] + "<br>" + regressions_result["curr_title"]}],
-                )
-            )
-        updatemenus = [
-            dict(
-                buttons=[button_all, button_hide] + surface_buttons,
-                direction="down",
-                pad={"r": 1, "t": 1},
-                showactive=True,
-                x=0.0,
-                xanchor="right",
-                y=0.5,
-                yanchor="bottom",
-            ),
-        ]
-        fig.update_layout(
-            updatemenus=updatemenus,
-            title=regressions_results[-1]["curr_title"],
-            scene=dict(xaxis_title=x_cols[0], yaxis_title=x_cols[1], zaxis_title=y_col),
-            showlegend=True,
-            height=700,
-            # width=1400,
-            template="plotly_dark",
-        )
-        fig.update_xaxes(showspikes=True, spikecolor="white", spikesnap="cursor", spikemode="across")
-        fig.update_yaxes(showspikes=True, spikecolor="white", spikesnap="cursor", spikethickness=0.5)
-        fig.show()
-
-    results = regressions_results[-1]["results"]
-    Y_pred = results.fittedvalues
-    residuals = results.resid
-    Y_pred = np.array(Y_pred)
-    residuals = np.array(residuals)
-    fig_resid = go.Figure()
-    fig_resid.add_trace(
-        go.Scatter(
-            x=Y_pred,
-            y=residuals,
-            mode="markers",
-            name=f"Residuals (Last {last_n_days} days)" if last_n_days != -1 else "Residuals (Entire Dataset)",
-        )
-    )
-    fig_resid.add_trace(
-        go.Scatter(
-            x=[Y_pred[-1]],
-            y=[residuals[-1]],
-            mode="markers",
-            marker=dict(color="red", size=10),
-            name=f"Most Recent Residual: {curr_df['Date'].iloc[-1]}",
-        )
-    )
-    fig_resid.add_shape(type="line", x0=Y_pred.min(), y0=0, x1=Y_pred.max(), y1=0, line=dict(color="Red", dash="dash"))
-    fig_resid.update_layout(
-        title="Residuals vs Predicted",
-        xaxis_title="Predicted Values",
-        yaxis_title="Residuals",
-        template="plotly_dark",
-        legend=dict(x=0.7, y=1.0, bgcolor="rgba(0,0,0,0)", font=dict(size=12)),
-    )
-    fig_resid.update_xaxes(showspikes=True, spikecolor="white", spikesnap="cursor", spikemode="across")
-    fig_resid.update_yaxes(showspikes=True, spikecolor="white", spikesnap="cursor", spikethickness=0.5)
-    fig_resid.show()
-
-    return results
-
-
-# ols, single and multi
-# tls
-# odr
-# pca
-
-
-def _run_odr(df: pd.DataFrame, x_cols: List[str], y_col: str, x_errs: Optional[npt.ArrayLike] = None, y_errs: Optional[npt.ArrayLike] = None):
-    def orthoregress(
-        x: pd.Series | npt.ArrayLike, y: pd.Series | npt.ArrayLike, x_errs: Optional[npt.ArrayLike] = None, y_errs: Optional[npt.ArrayLike] = None
-    ):
-        # calc weights (inverse variances)
-        wd = None
-        we = None
-        if x_errs is not None:
-            wd = 1.0 / np.square(x_errs)
-        if y_errs is not None:
-            we = 1.0 / np.square(y_errs)
-
-        def f(p, x):
-            return (p[0] * x) + p[1]
-
-        od = ODR(Data(x, y, wd=wd, we=we), Model(f), beta0=linregress(x, y)[0:2])
-        out = od.run()
-        return out
-
-    def orthoregress_multilinear(
-        X: pd.DataFrame | pd.Series | npt.ArrayLike,
-        y: pd.Series | npt.ArrayLike,
-        x_errs: Optional[npt.ArrayLike] = None,
-        y_errs: Optional[npt.ArrayLike] = None,
-    ):
-        # calc weights (inverse variances)
-        wd = None
-        we = None
-        if x_errs is not None:
-            x_errs = np.asarray(x_errs)
-            wd = 1.0 / np.square(x_errs.T)  # transpose to match ODR shape
-        if y_errs is not None:
-            we = 1.0 / np.square(y_errs)
-
-        def multilinear_f(p, x):
-            return np.dot(p[:-1], x) + p[-1]
-
-        X = np.asarray(X)
-        y = np.asarray(y)
-        X_odr = X.T
-        y_flat = y.flatten()
-        X_with_intercept = np.column_stack((X, np.ones(X.shape[0])))
-        beta_init, _, _, _ = np.linalg.lstsq(X_with_intercept, y_flat, rcond=None)
-        beta0 = np.append(beta_init[:-1], beta_init[-1])
-        model = Model(multilinear_f)
-        data = Data(X_odr, y, wd=wd, we=we)
-        odr_instance = ODR(data, model, beta0=beta0)
-        output = odr_instance.run()
-        return output
-
-    if len(x_cols) > 1:
-        out = orthoregress_multilinear(df[x_cols], df[y_col], x_errs, y_errs)
-    else:
-        out = orthoregress(df[x_cols[0]], df[y_col], x_errs, y_errs)
-    out.beta = np.roll(out.beta, 1)
-    return out
-
-
-def _run_pca(df: pd.DataFrame, x_cols: List[str], y_col: str, run_pca_on_corr_mat: Optional[bool] = False):
-    data = df[x_cols + [y_col]]
-    if run_pca_on_corr_mat:
-        scaler = StandardScaler()
-        data_scaled = scaler.fit_transform(data)
-        data_to_fit = data_scaled
-    else:
-        data_to_fit = data.values
-
-    pca = PCA().fit(data_to_fit)
-    return pca
-
-
-def _run_pcr(
-    df: pd.DataFrame,
-    x_cols: List[str],
-    y_col: str,
-    n_components: Optional[int] = None,
-    run_pca_on_corr_mat: Optional[bool] = False,
-):
-    X = df[x_cols].values
-    y = df[y_col].values
-
-    if run_pca_on_corr_mat:
-        scaler = StandardScaler()
-        X_to_fit = scaler.fit_transform(X)
-    else:
-        X_to_fit = X
-
-    if n_components is None:
-        n_components = min(len(x_cols), X_to_fit.shape[0])
-
-    pca = PCA(n_components=n_components).fit_transform(X_to_fit)
-    X_pca_with_const = sm.add_constant(pca)
-    return sm.OLS(y, X_pca_with_const).fit()
-
-
-def hedge_hog(
-    df: pd.DataFrame,
-    x_cols: List[str],
-    y_col: str,
-    run_on_level_changes: Optional[bool] = False,
-    run_on_percent_changes: Optional[bool] = False,
-    run_pca_on_corr_mat: Optional[bool] = False,
-    x_errs: Optional[npt.ArrayLike] = None,
-    y_errs: Optional[npt.ArrayLike] = None,
-    # rolling_windows: Optional[List[int]] = None,
-    # base_notational: Optional[int] = 1_000_000,
-) -> Dict[str, sm.regression.linear_model.RegressionResults | Output | pd.DataFrame]:
-    df = df[["Date"] + x_cols + [y_col]].copy()
-    if run_on_level_changes:
-        date_col = df["Date"]
-        df = df[x_cols + [y_col]].diff()
-        df["Date"] = date_col
-    if run_on_percent_changes:
-        date_col = df["Date"]
-        df = df[x_cols + [y_col]].pct_change()
-        df["Date"] = date_col
-
-    df = df.dropna()
-
-    pca = _run_pca(df=df, x_cols=x_cols, y_col=y_col, run_pca_on_corr_mat=run_pca_on_corr_mat)
-
-    regression_results = {
-        "ols": sm.OLS(df[y_col], sm.add_constant(df[x_cols])).fit(),
-        "tls": _run_odr(df=df, x_cols=x_cols, y_col=y_col, x_errs=None, y_errs=None),
-        "odr": _run_odr(df=df, x_cols=x_cols, y_col=y_col, x_errs=x_errs, y_errs=y_errs),  # ODR becomes TLS if errors not specified
-        "pca": pca,
-        "pca_loadings_df": pd.DataFrame(pca.components_.T, index=x_cols + [y_col], columns=[f"PC_{i+1}" for i in range(len(pca.components_))]),
-        "pcr": _run_pcr(df=df, x_cols=x_cols, y_col=y_col, run_pca_on_corr_mat=run_pca_on_corr_mat),
-    }
-
-    if len(x_cols) > 1:
-        df[f"{x_cols[0]}s{x_cols[1]}s"] = df[x_cols[1]] - df[x_cols[0]]
-        df[f"{x_cols[0]}s{y_col}s{x_cols[1]}s"] = (df[y_col] - df[x_cols[0]]) - (df[x_cols[1]] - df[y_col])
-        regression_results["mvlsr_ols"] = sm.OLS(
-            df[y_col], sm.add_constant(df[[f"{x_cols[0]}s{x_cols[1]}s", f"{x_cols[0]}s{y_col}s{x_cols[1]}s"]])
-        ).fit()
-
-    return regression_results
+from CurveBuilder import calc_ust_impl_spot_n_fwd_curve, calc_ust_metrics
+from CurveDataFetcher import CurveDataFetcher
+from utils.arbitragelab import JohansenPortfolio, construct_spread, EngleGrangerPortfolio
 
 
 def dv01_neutral_steepener_hegde_ratio(
@@ -550,6 +133,7 @@ def dv01_neutral_steepener_hegde_ratio(
     }
 
 
+# reference point is buying the belly => fly spread down
 def dv01_neutral_butterfly_hegde_ratio(
     as_of_date: datetime,
     front_wing_bond_row: Dict | pd.Series,
@@ -687,3 +271,440 @@ def dv01_neutral_butterfly_hegde_ratio(
         - (hedge_ratios["front_wing_hr"] * (front_wing_metrics["rough_carry"] + front_wing_metrics["rough_12m_rolldown"]))
         - (hedge_ratios["back_wing_hr"] * (back_wing_metrics["rough_carry"] + back_wing_metrics["rough_12m_rolldown"])),
     }
+
+
+def _run_odr(df: pd.DataFrame, x_cols: List[str], y_col: str, x_errs: Optional[npt.ArrayLike] = None, y_errs: Optional[npt.ArrayLike] = None):
+    def orthoregress(
+        x: pd.Series | npt.ArrayLike, y: pd.Series | npt.ArrayLike, x_errs: Optional[npt.ArrayLike] = None, y_errs: Optional[npt.ArrayLike] = None
+    ):
+        # calc weights (inverse variances)
+        wd = None
+        we = None
+        if x_errs is not None:
+            wd = 1.0 / np.square(x_errs)
+        if y_errs is not None:
+            we = 1.0 / np.square(y_errs)
+
+        def f(p, x):
+            return (p[0] * x) + p[1]
+
+        od = ODR(Data(x, y, wd=wd, we=we), Model(f), beta0=linregress(x, y)[0:2])
+        out = od.run()
+        return out
+
+    def orthoregress_multilinear(
+        X: pd.DataFrame | pd.Series | npt.ArrayLike,
+        y: pd.Series | npt.ArrayLike,
+        x_errs: Optional[npt.ArrayLike] = None,
+        y_errs: Optional[npt.ArrayLike] = None,
+    ):
+        # calc weights (inverse variances)
+        wd = None
+        we = None
+        if x_errs is not None:
+            x_errs = np.asarray(x_errs)
+            wd = 1.0 / np.square(x_errs.T)  # transpose to match ODR shape
+        if y_errs is not None:
+            we = 1.0 / np.square(y_errs)
+
+        def multilinear_f(p, x):
+            return np.dot(p[:-1], x) + p[-1]
+
+        X = np.asarray(X)
+        y = np.asarray(y)
+        X_odr = X.T
+        y_flat = y.flatten()
+        X_with_intercept = np.column_stack((X, np.ones(X.shape[0])))
+        beta_init, _, _, _ = np.linalg.lstsq(X_with_intercept, y_flat, rcond=None)
+        beta0 = np.append(beta_init[:-1], beta_init[-1])
+        model = Model(multilinear_f)
+        data = Data(X_odr, y, wd=wd, we=we)
+        odr_instance = ODR(data, model, beta0=beta0)
+        output = odr_instance.run()
+        return output
+
+    if len(x_cols) > 1:
+        out = orthoregress_multilinear(df[x_cols], df[y_col], x_errs, y_errs)
+    else:
+        out = orthoregress(df[x_cols[0]], df[y_col], x_errs, y_errs)
+    out.beta = np.roll(out.beta, 1)
+    return out
+
+
+def calc_pca_loadings_matrix(
+    df: pd.DataFrame,
+    cols: Optional[List[str]] = None,
+    run_on_level_changes: Optional[bool] = False,
+    run_pca_on_corr_mat: Optional[bool] = False,
+    scale_loadings: Optional[bool] = False,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+
+    if cols:
+        df = df[cols].copy()
+    else:
+        df = df.copy()
+
+    if run_on_level_changes:
+        df = df.diff().dropna()
+
+    if run_pca_on_corr_mat:
+        scaler = StandardScaler()
+        values_to_fit = scaler.fit_transform(df)
+    else:
+        values_to_fit = df.values
+
+    pca = PCA()
+    pc_scores_signs_not_flipped = pca.fit_transform(values_to_fit)
+    pc_scores_df = pd.DataFrame(
+        {
+            "Date": df.index,
+            "PC1": pc_scores_signs_not_flipped[:, 0],
+            # https://stackoverflow.com/questions/44765682/in-sklearn-decomposition-pca-why-are-components-negative
+            "PC2": -1 * pc_scores_signs_not_flipped[:, 1],
+            "PC3": -1 * pc_scores_signs_not_flipped[:, 2] if len(df.columns) > 3 else None,
+        }
+    )
+
+    if scale_loadings:
+        # the sensitivity of each original tenor to changes in each principal component
+        # the loadings reflect how much variance (in original units) is explained by each PC b/c scaled by sqrt(eigenvalues)
+        loadings_df = pd.DataFrame(
+            pca.components_.T * np.sqrt(pca.explained_variance_), index=df.columns, columns=[f"PC{i+1}" for i in range(len(df.columns))]
+        )
+    else:
+        loadings_df = pd.DataFrame(pca.components_.T, index=df.columns, columns=[f"PC{i+1}" for i in range(len(df.columns))])
+
+    return {"pca": pca, "loading_matrix": loadings_df, "pc_scores_matrix": pc_scores_df}
+
+
+# Adapted from https://github.com/hudson-and-thames/arbitragelab/blob/master/arbitragelab/hedge_ratios/box_tiao.py
+def get_box_tiao_hedge_ratio(price_data: pd.DataFrame, dependent_variable: str) -> Tuple[dict, pd.DataFrame, None, pd.Series]:
+    """
+    Perform Box-Tiao canonical decomposition on the assets dataframe.
+
+    The resulting ratios are the weightings of each asset in the portfolio. There are N decompositions for N assets,
+    where each column vector corresponds to one portfolio. The order of the weightings corresponds to the
+    descending order of the eigenvalues.
+
+    :param price_data: (pd.DataFrame) DataFrame with security prices.
+    :param dependent_variable: (str) Column name which represents the dependent variable (y).
+    :return: (Tuple) Hedge ratios, X, and fit residuals.
+    """
+
+    def _least_square_VAR_fit(demeaned_price_data: pd.DataFrame) -> np.array:
+        """
+        Calculate the least square estimate of the VAR(1) matrix.
+
+        :param demeaned_price_data: (pd.DataFrame) Demeaned price data.
+        :return: (np.array) Least square estimate of VAR(1) matrix.
+        """
+
+        # Fit VAR(1) model
+        var_model = sm.tsa.VAR(demeaned_price_data)
+
+        # The statsmodels package will give the least square estimate
+        least_sq_est = np.squeeze(var_model.fit(1).coefs, axis=0)
+
+        return least_sq_est, var_model
+
+    X = price_data.copy()
+    X = X[[dependent_variable] + [x for x in X.columns if x != dependent_variable]]
+
+    demeaned = X - X.mean()  # Subtract mean columns
+
+    # Calculate the least square estimate of the price with VAR(1) model
+    least_sq_est, var_model = _least_square_VAR_fit(demeaned)
+
+    # Construct the matrix from which the eigenvectors need to be computed
+    covar = demeaned.cov()
+    box_tiao_matrix = np.linalg.inv(covar) @ least_sq_est @ covar @ least_sq_est.T
+
+    # Calculate the eigenvectors and sort by eigenvalue
+    eigvals, eigvecs = np.linalg.eig(box_tiao_matrix)
+
+    # Sort the eigenvectors by eigenvalues by descending order
+    bt_eigvecs = eigvecs[:, np.argsort(eigvals)[::-1]]
+    hedge_ratios = dict(zip(X.columns, bt_eigvecs[:, -1]))
+
+    beta_weights = []
+    # Convert to a format expected by `construct_spread` function and normalize such that dependent has a hedge ratio 1
+    for ticker, h in hedge_ratios.items():
+        if ticker != dependent_variable:
+            beta = -h / hedge_ratios[dependent_variable]
+            hedge_ratios[ticker] = beta
+            beta_weights.append(beta)
+    hedge_ratios[dependent_variable] = 1.0
+
+    residuals = construct_spread(price_data, hedge_ratios=hedge_ratios, dependent_variable=dependent_variable)
+    # return hedge_ratios, X, residuals
+    return {
+        "beta_weights": beta_weights,
+        "hedge_ratios_dict": hedge_ratios,
+        "X": X,
+        "residuals": residuals,
+        "results": var_model,
+    }
+
+
+def get_johansen_hedge_ratio(price_data: pd.DataFrame, dependent_variable: str) -> Tuple[dict, pd.DataFrame, pd.Series, pd.Series]:
+    """
+    Get hedge ratio from Johansen test eigenvector.
+
+    :param price_data: (pd.DataFrame) DataFrame with security prices.
+    :param dependent_variable: (str) Column name which represents the dependent variable (y).
+    :return: (Tuple) Hedge ratios, X, and y and OLS fit residuals.
+    """
+
+    # Construct a Johansen portfolio
+    port = JohansenPortfolio()
+    port.fit(price_data, dependent_variable)
+
+    X = price_data.copy()
+    X.drop(columns=dependent_variable, axis=1, inplace=True)
+
+    y = price_data[dependent_variable].copy()
+
+    # Convert to a format expected by `construct_spread` function and normalize such that dependent has a hedge ratio 1.
+    hedge_ratios = port.hedge_ratios.iloc[0].to_dict()
+    residuals = construct_spread(price_data, hedge_ratios=hedge_ratios, dependent_variable=dependent_variable)
+
+    hedge_ratios_copy = hedge_ratios.copy()
+    del hedge_ratios_copy[dependent_variable]
+
+    # Normalize Johansen cointegration vectors such that dependent variable has a hedge ratio of 1.
+    return {
+        "beta_weights": list(hedge_ratios_copy.values()),
+        "hedge_ratios_dict": hedge_ratios,
+        "X": X,
+        "y": y,
+        "residuals": residuals,
+        "results": port,
+    }
+
+
+def get_minimum_hl_hedge_ratio(price_data: pd.DataFrame, dependent_variable: str) -> Tuple[dict, pd.DataFrame, pd.Series, pd.Series, object]:
+    """
+    Get hedge ratio by minimizing spread half-life of mean reversion.
+
+    :param price_data: (pd.DataFrame) DataFrame with security prices.
+    :param dependent_variable: (str) Column name which represents the dependent variable (y).
+    :return: (Tuple) Hedge ratios, X, and y, OLS fit residuals and optimization object.
+    """
+
+    def get_half_life_of_mean_reversion(data: pd.Series) -> float:
+        """
+        Get half-life of mean-reversion under the assumption that data follows the Ornstein-Uhlenbeck process.
+
+        :param data: (np.array) Data points.
+        :return: (float) Half-life of mean reversion.
+        """
+
+        reg = LinearRegression(fit_intercept=True)
+
+        training_data = data.shift(1).dropna().values.reshape(-1, 1)
+        target_values = data.diff().dropna()
+        reg.fit(X=training_data, y=target_values)
+
+        half_life = -np.log(2) / reg.coef_[0]
+
+        return half_life
+
+    def _min_hl_function(beta: np.array, X: pd.DataFrame, y: pd.Series) -> float:
+        """
+        Fitness function to minimize in Minimum Half-Life Hedge Ratio algorithm.
+
+        :param beta: (np.array) Array of hedge ratios.
+        :param X: (pd.DataFrame) DataFrame of dependent variables. We hold `beta` units of X assets.
+        :param y: (pd.Series) Series of target variable. For this asset we hold 1 unit.
+        :return: (float) Half-life of mean-reversion.
+        """
+
+        spread = y - (beta * X).sum(axis=1)
+        return abs(get_half_life_of_mean_reversion(spread))
+
+    X = price_data.copy()
+    X.drop(columns=dependent_variable, axis=1, inplace=True)
+
+    y = price_data[dependent_variable].copy()
+    initial_guess = (y[0] / X).mean().values
+    result = minimize(_min_hl_function, x0=initial_guess, method="BFGS", tol=1e-5, args=(X, y))
+    residuals = y - (result.x * X).sum(axis=1)
+
+    hedge_ratios = result.x
+    hedge_ratios_dict = dict(zip([dependent_variable] + X.columns.tolist(), np.insert(hedge_ratios, 0, 1.0)))
+    if result.status != 0:
+        warnings.warn("Minimum Half Life Optimization failed to converge. Please check output hedge ratio! The result can be unstable!")
+    return {
+        "beta_weights": list(hedge_ratios),
+        "hedge_ratios_dict": hedge_ratios_dict,
+        "X": X,
+        "y": y,
+        "residuals": residuals,
+        "results": result,
+    }
+
+
+def get_adf_optimal_hedge_ratio(price_data: pd.DataFrame, dependent_variable: str) -> Tuple[dict, pd.DataFrame, pd.Series, pd.Series, object]:
+    """
+    Get hedge ratio by minimizing ADF test statistic.
+
+    :param price_data: (pd.DataFrame) DataFrame with security prices.
+    :param dependent_variable: (str) Column name which represents the dependent variable (y).
+    :return: (Tuple) Hedge ratios, X, and y, OLS fit residuals and optimization object.
+    """
+
+    def _min_adf_stat(beta: np.array, X: pd.DataFrame, y: pd.Series) -> float:
+        """
+        Fitness function to minimize in ADF test statistic algorithm.
+
+        :param beta: (np.array) Array of hedge ratios.
+        :param X: (pd.DataFrame) DataFrame of dependent variables. We hold `beta` units of X assets.
+        :param y: (pd.Series) Series of target variable. For this asset we hold 1 unit.
+        :return: (float) Half-life of mean-reversion.
+        """
+
+        # Performing Engle-Granger test on spread
+        portfolio = EngleGrangerPortfolio()
+        spread = y - (beta * X).sum(axis=1)
+        portfolio.perform_eg_test(spread)
+
+        return portfolio.adf_statistics.loc["statistic_value"].iloc[0]
+
+    X = price_data.copy()
+    X.drop(columns=dependent_variable, axis=1, inplace=True)
+
+    y = price_data[dependent_variable].copy()
+    initial_guess = (y[0] / X).mean().values
+    result = minimize(_min_adf_stat, x0=initial_guess, method="BFGS", tol=1e-5, args=(X, y))
+    residuals = y - (result.x * X).sum(axis=1)
+
+    hedge_ratios = result.x
+    hedge_ratios_dict = dict(zip([dependent_variable] + X.columns.tolist(), np.insert(hedge_ratios, 0, 1.0)))
+    if result.status != 0:
+        warnings.warn("ADF Optimization failed to converge. Please check output hedge ratio! The result can be unstable!")
+
+    return {
+        "beta_weights": list(hedge_ratios),
+        "hedge_ratios_dict": hedge_ratios_dict,
+        "X": X,
+        "y": y,
+        "residuals": residuals,
+        "results": result,
+    }
+
+
+def beta_estimates(
+    df: pd.DataFrame,
+    x_cols: List[str],
+    y_col: str,
+    run_on_level_changes: Optional[bool] = False,
+    x_errs: Optional[npt.ArrayLike] = None,
+    y_errs: Optional[npt.ArrayLike] = None,
+    pc_scores_df: Optional[pd.DataFrame] = None,
+    loadings_df: Optional[pd.DataFrame] = None,
+) -> Dict[str, sm.regression.linear_model.RegressionResults | Output | pd.DataFrame]:
+
+    df = df[["Date"] + x_cols + [y_col]].copy()
+    df_level = df.copy()
+
+    if len(x_cols) == 1:
+        df["spread"] = df[y_col] - df[x_cols[0]]
+    elif len(x_cols) == 2:
+        df["spread"] = (df[y_col] - df[x_cols[0]]) - (df[x_cols[1]] - df[y_col])
+    else:
+        raise ValueError("Too many x_cols")
+
+    if run_on_level_changes:
+        date_col = df["Date"]
+        df = df[x_cols + [y_col] + ["spread"]].diff()
+        df["Date"] = date_col
+    df = df.dropna()
+
+    pc1_beta = None
+    if loadings_df is not None:
+        ep_x0_pc1 = loadings_df.loc[x_cols[0], "PC1"]
+        ep_x0_pc2 = loadings_df.loc[x_cols[0], "PC2"]
+        ep_x0_pc3 = loadings_df.loc[x_cols[0], "PC3"]
+
+        ep_y_pc1 = loadings_df.loc[y_col, "PC1"]
+        ep_y_pc2 = loadings_df.loc[y_col, "PC2"]
+        ep_y_pc3 = loadings_df.loc[y_col, "PC3"]
+
+        if len(x_cols) > 1:
+            ep_x1_pc1 = loadings_df.loc[x_cols[1], "PC1"]
+            ep_x1_pc2 = loadings_df.loc[x_cols[1], "PC2"]
+            ep_x1_pc3 = loadings_df.loc[x_cols[1], "PC3"]
+
+            # see  Doug Huggins, Christian Schaller Fixed Income Relative Value Analysis ed2 page 76 APPROPRIATE HEDGING
+            r"""
+                Hedge ratios against more factors are best calculated via matrix inversion. 
+                For example, the hedge ratio for a 2Y-5Y-10Y butterfly which is neutral to changes in the first and 
+                second factor can be calculated for a given notional $n_5$ for 5Y by:
+                    $$
+                        \begin{pmatrix}
+                            n_2 \\
+                            n_{10}
+                        \end{pmatrix}
+                        = 
+                        \begin{pmatrix}
+                            BPV_2 \cdot e_{12} & BPV_2 \cdot e_{22} \\
+                            BPV_{10} \cdot e_{12} & BPV_{10} \cdot e_{22}
+                            \end{pmatrix}^{-1} 
+                            \begin{pmatrix}
+                            - n_5 \cdot BPV_5 \cdot e_{15} \\
+                            - n_5 \cdot BPV_5 \cdot e_{25}
+                        \end{pmatrix}
+                    $$
+            """
+            pc1_beta = list(np.dot(np.linalg.inv(np.array([[ep_x0_pc1, ep_x1_pc1], [ep_x0_pc2, ep_x1_pc2]])), np.array([ep_y_pc1, ep_y_pc2])))
+        else:
+            pc1_beta = ep_y_pc1 / ep_x0_pc1
+
+    regression_results = {
+        "ols": sm.OLS(df[y_col], sm.add_constant(df[x_cols])).fit(),
+        "tls": _run_odr(df=df, x_cols=x_cols, y_col=y_col, x_errs=None, y_errs=None),
+        # ODR becomes TLS if errors not specified
+        "odr": _run_odr(df=df, x_cols=x_cols, y_col=y_col, x_errs=x_errs, y_errs=y_errs) if x_errs or y_errs else None,
+        "box_tiao": get_box_tiao_hedge_ratio(df_level[["Date"] + x_cols + [y_col]].set_index("Date"), dependent_variable=y_col),
+        "johansen": get_johansen_hedge_ratio(df_level[["Date"] + x_cols + [y_col]].set_index("Date"), dependent_variable=y_col),
+        "minimum_half_life": get_minimum_hl_hedge_ratio(df_level[["Date"] + x_cols + [y_col]].set_index("Date"), dependent_variable=y_col),
+        "adf_optimal": get_adf_optimal_hedge_ratio(df_level[["Date"] + x_cols + [y_col]].set_index("Date"), dependent_variable=y_col),
+        "pcr_pc1": sm.OLS(df["spread"].to_numpy(), sm.add_constant(pc_scores_df["PC1"].to_numpy())).fit() if pc_scores_df is not None else None,
+        "pcr_pc2": sm.OLS(df["spread"].to_numpy(), sm.add_constant(pc_scores_df["PC2"].to_numpy())).fit() if pc_scores_df is not None else None,
+        "pcr_pc3": sm.OLS(df["spread"].to_numpy(), sm.add_constant(pc_scores_df["PC3"].to_numpy())).fit() if pc_scores_df is not None else None,
+    }
+
+    beta_estimates = {
+        "ols": (
+            regression_results["ols"].params[1] if len(x_cols) == 1 else [regression_results["ols"].params[1], regression_results["ols"].params[2]]
+        ),
+        "tls": regression_results["tls"].beta[1] if len(x_cols) == 1 else [regression_results["tls"].beta[1], regression_results["tls"].beta[2]],
+        "odr": (
+            regression_results["odr"].beta[1]
+            if (x_errs or y_errs) and len(x_cols) == 1
+            else [regression_results["odr"].beta[1], regression_results["odr"].beta[2]] if x_errs or y_errs else None
+        ),
+        "pc1_beta": pc1_beta,
+        "box_tiao": regression_results["box_tiao"]["beta_weights"],
+        "johansen": regression_results["johansen"]["beta_weights"],
+        "minimum_half_life": regression_results["minimum_half_life"]["beta_weights"],
+        "adf_optimal": regression_results["adf_optimal"]["beta_weights"],
+    }
+
+    pcs_exposures = {
+        "pcr_pc1_exposure": regression_results["pcr_pc1"].params[1] if pc_scores_df is not None else None,
+        "pcr_pc2_exposure": regression_results["pcr_pc2"].params[1] if pc_scores_df is not None else None,
+        "pcr_pc3_exposure": regression_results["pcr_pc3"].params[1] if pc_scores_df is not None else None,
+        # checking 50-50 duration - if non-zero => exposures exists
+        "epsilon_pc1_loadings_exposure": (
+            ep_y_pc1 - (ep_x0_pc1 + ep_x1_pc1) / 2.0 if len(x_cols) > 1 else ep_x0_pc1 - ep_y_pc1 if loadings_df is not None else None
+        ),
+        "epsilon_pc2_loadings_exposure": (
+            ep_y_pc2 - (ep_x0_pc2 + ep_x1_pc2) / 2.0 if len(x_cols) > 1 else ep_x0_pc2 - ep_y_pc2 if loadings_df is not None else None
+        ),
+        "epsilon_pc3_loadings_exposure": (
+            ep_y_pc3 - (ep_x0_pc3 + ep_x1_pc3) / 2.0 if len(x_cols) > 1 else ep_x0_pc3 - ep_y_pc3 if loadings_df is not None else None
+        ),
+    }
+
+    return {"betas": beta_estimates, "regression_results": regression_results, "pc_exposures": pcs_exposures}

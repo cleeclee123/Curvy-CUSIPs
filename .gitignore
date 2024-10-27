@@ -131,4 +131,6 @@ dist
 
 secret/
 temp.ipynb
+temp.py
+temp2.py
 working_paper.ipynb

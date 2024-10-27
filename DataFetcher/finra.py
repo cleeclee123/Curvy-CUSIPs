@@ -4,7 +4,7 @@ import time
 import warnings
 from collections import defaultdict
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Literal
 
 import aiohttp
 import pandas as pd
@@ -44,9 +44,10 @@ class FinraDataFetcher(DataFetcherBase):
 
     def fetch_historcal_trace_trade_history_by_cusip(
         self,
-        cusips: List[str],
         start_date: datetime,
         end_date: datetime,
+        cusips: Optional[List[str]] = None,
+        benchmark_terms: Optional[List[Literal["1Y", "2Y", "3Y", "5Y", "7Y", "10Y" "20Y", "30Y"]]] = None,
         xlsx_path: Optional[str] = None,
         session_timeout_minutes: Optional[int] = 5,
     ):
@@ -54,9 +55,10 @@ class FinraDataFetcher(DataFetcherBase):
 
         async def build_fetch_tasks_historical_trace_data(
             session: aiohttp.ClientSession,
-            cusips: List[str],
             start_date: datetime,
             end_date: datetime,
+            cusips: Optional[List[str]] = None,
+            benchmark_terms: Optional[List[Literal["1Y", "2Y", "3Y", "5Y", "7Y", "10Y" "20Y", "30Y"]]] = None,
             uid: Optional[str | int] = None,
         ):
             finra_cookie_headers = {
@@ -89,7 +91,7 @@ class FinraDataFetcher(DataFetcherBase):
                 raise ValueError(
                     f"TRACE - FINRA Cookies Request Bad Status: {finra_cookie_response.status_code}"
                 )
-            finra_cookie_str = dict(finra_cookie_response.headers)["set-cookie"]
+            finra_cookie_str = dict(finra_cookie_response.headers)["Set-Cookie"]
             finra_cookie_dict = cookie_string_to_dict(cookie_string=finra_cookie_str)
             self._logger.info(
                 f"TRACE - FINRA Cookie Fetch Took: {time.time() - finra_cookie_t1} seconds"
@@ -126,12 +128,27 @@ class FinraDataFetcher(DataFetcherBase):
 
             # maps size of trade history records between given start and end dates of said cusip
             def build_finra_trade_history_payload(
-                cusip: str,
                 start_date: datetime,
                 end_date: datetime,
                 limit: int,
                 offset: int,
+                cusip: Optional[str] = None,
+                benchmark_term: Optional[Literal["1Y", "2Y", "3Y", "5Y", "7Y", "10Y" "20Y", "30Y"]] = None,
             ) -> Dict[str, int]:
+                if cusip:
+                    filter_payload = [{
+                        "fieldName": "cusip",
+                        "fieldValue": cusip,
+                        "compareType": "EQUAL",
+                    }]
+                elif benchmark_term:
+                    filter_payload = [{
+                        "fieldName": "benchmarkTermCode",
+                        "fieldValue": benchmark_term,
+                        "compareType": "EQUAL",
+                    }]
+                else:
+                    raise ValueError("One of 'cusip', 'benchmark_term' must be a parameter - (build_finra_trade_history_payload)")
                 return {
                     "fields": [
                         "issueSymbolIdentifier",
@@ -152,25 +169,23 @@ class FinraDataFetcher(DataFetcherBase):
                             "endDate": end_date.strftime("%Y-%m-%d"),
                         },
                     ],
-                    "compareFilters": [
-                        {
-                            "fieldName": "cusip",
-                            "fieldValue": cusip,
-                            "compareType": "EQUAL",
-                        },
-                    ],
+                    "compareFilters": filter_payload, 
                     "limit": limit,  # 5000 is Max Limit
                     "offset": offset,
                 }
 
             def get_cusips_finra_pagination_configs(
-                cusips: List[str], start_date: datetime, end_date: datetime
+                start_date: datetime, 
+                end_date: datetime,
+                cusips: Optional[List[str]] = None,
+                benchmark_terms: Optional[List[Literal["1Y", "2Y", "3Y", "5Y", "7Y", "10Y" "20Y", "30Y"]]] = None,
             ):
                 async def fetch_finra_cusip_pagination_config(
                     config_session: aiohttp.ClientSession,
-                    cusip: str,
                     start_date: datetime,
                     end_date: datetime,
+                    cusip: Optional[str] = None,
+                    benchmark_term: Optional[Literal["1Y", "2Y", "3Y", "5Y", "7Y", "10Y" "20Y", "30Y"]] = None,
                 ):
                     try:
                         url = "https://services-dynarep.ddwa.finra.org/public/reporting/v2/data/group/FixedIncomeMarket/name/TreasuryTradeHistory"
@@ -181,11 +196,12 @@ class FinraDataFetcher(DataFetcherBase):
                                 x_xsrf_token_str=finra_cookie_dict["XSRF-TOKEN"],
                             ),
                             json=build_finra_trade_history_payload(
-                                cusip=cusip,
                                 start_date=start_date,
                                 end_date=end_date,
                                 limit=1,
                                 offset=1,
+                                cusip=cusip,
+                                benchmark_term=benchmark_term
                             ),
                             proxy=self._proxies["https"],
                         )
@@ -194,52 +210,88 @@ class FinraDataFetcher(DataFetcherBase):
                         record_total_str = record_total_json["returnBody"]["headers"][
                             "Record-Total"
                         ][0]
-                        return cusip, record_total_str
+                        
+                        if cusip:
+                            return cusip, record_total_str
+                        elif benchmark_term: 
+                            return benchmark_term, record_total_str
+                        else:
+                            raise ValueError("One of 'cusip', 'benchmark_term' must be a parameter - (get_cusips_finra_pagination_configs)")
+                        
                     except aiohttp.ClientResponseError:
                         self._logger.error(
                             f"TRACE - CONFIGs Bad Status: {config_response.status}"
                         )
-                        return cusip, -1
+                        record_total_str = -1
+                        if cusip:
+                            return cusip, record_total_str
+                        elif benchmark_term: 
+                            return benchmark_term, record_total_str
+                        else:
+                            raise ValueError("One of 'cusip', 'benchmark_term' must be a parameter - (get_cusips_finra_pagination_configs)")
 
                     except Exception as e:
                         self._logger.error(f"TRACE - CONFIGs Error : {str(e)}")
-                        return cusip, -1
+                        record_total_str = -1
+                        if cusip:
+                            return cusip, record_total_str
+                        elif benchmark_term: 
+                            return benchmark_term, record_total_str
+                        else:
+                            raise ValueError("One of 'cusip', 'benchmark_term' must be a parameter - (get_cusips_finra_pagination_configs)")
 
                 async def build_finra_config_tasks(
                     config_session: aiohttp.ClientSession,
-                    cusips: List[str],
                     start_date: datetime,
                     end_date: datetime,
+                    cusips: Optional[List[str]] = None,
+                    benchmark_terms: Optional[List[Literal["1Y", "2Y", "3Y", "5Y", "7Y", "10Y" "20Y", "30Y"]]] = None,
                 ):
-                    tasks = [
-                        fetch_finra_cusip_pagination_config(
-                            config_session=config_session,
-                            cusip=cusip,
-                            start_date=start_date,
-                            end_date=end_date,
-                        )
-                        for cusip in cusips
-                    ]
+                    if cusips:
+                        tasks = [
+                            fetch_finra_cusip_pagination_config(
+                                config_session=config_session,
+                                start_date=start_date,
+                                end_date=end_date,
+                                cusip=cusip,
+                            )
+                            for cusip in cusips
+                        ]
+                    elif benchmark_terms:
+                        tasks = [
+                            fetch_finra_cusip_pagination_config(
+                                config_session=config_session,
+                                start_date=start_date,
+                                end_date=end_date,
+                                benchmark_term=benchmark_term
+                            )
+                            for benchmark_term in benchmark_terms 
+                        ]
+                    else:
+                        raise ValueError("One of 'cusip', 'benchmark_term' must be a parameter - (build_finra_config_tasks)")
+                    
                     return await asyncio.gather(*tasks)
 
                 async def run_fetch_all(
-                    cusips: List[str], start_date: datetime, end_date: datetime
+                    start_date: datetime,
+                    end_date: datetime,
+                    cusips: Optional[List[str]] = None,
+                    benchmark_terms: Optional[List[Literal["1Y", "2Y", "3Y", "5Y", "7Y", "10Y" "20Y", "30Y"]]] = None,
                 ) -> List[pd.DataFrame]:
-                    async with aiohttp.ClientSession(
-                        proxy=self._proxies["https"]
-                    ) as config_session:
+                    async with aiohttp.ClientSession() as config_session:
                         all_data = await build_finra_config_tasks(
                             config_session=config_session,
-                            cusips=cusips,
                             start_date=start_date,
                             end_date=end_date,
+                            cusips=cusips,
+                            benchmark_terms=benchmark_terms
                         )
                         return all_data
 
                 cusip_finra_api_payload_configs = dict(
                     asyncio.run(
                         run_fetch_all(
-                            cusips=cusips, start_date=start_date, end_date=end_date
+                            start_date=start_date, end_date=end_date, cusips=cusips, benchmark_terms=benchmark_terms,
                         )
                     )
                 )
@@ -247,7 +299,7 @@ class FinraDataFetcher(DataFetcherBase):
 
             cusip_finra_api_payload_configs_t1 = time.time()
             cusip_finra_api_payload_configs = get_cusips_finra_pagination_configs(
-                cusips=cusips, start_date=start_date, end_date=end_date
+                start_date=start_date, end_date=end_date, cusips=cusips, benchmark_terms=benchmark_terms
             )
             self._logger.info(
                 f"TRACE - FINRA CUSIP API Payload Configs Took: {time.time() - cusip_finra_api_payload_configs_t1} seconds"
@@ -258,10 +310,11 @@ class FinraDataFetcher(DataFetcherBase):
 
             async def fetch_finra_cusip_trade_history(
                 session: aiohttp.ClientSession,
-                cusip: str,
                 start_date: datetime,
                 end_date: datetime,
                 offset: int,
+                cusip: Optional[str] = None,
+                benchmark_term: Optional[Literal["1Y", "2Y", "3Y", "5Y", "7Y", "10Y" "20Y", "30Y"]] = None,
             ):
                 try:
                     url = "https://services-dynarep.ddwa.finra.org/public/reporting/v2/data/group/FixedIncomeMarket/name/TreasuryTradeHistory"
@@ -272,11 +325,12 @@ class FinraDataFetcher(DataFetcherBase):
                             x_xsrf_token_str=finra_cookie_dict["XSRF-TOKEN"],
                         ),
                         json=build_finra_trade_history_payload(
-                            cusip=cusip,
                             start_date=start_date,
                             end_date=end_date,
                             limit=5000,
                             offset=offset,
+                            cusip=cusip,
+                            benchmark_term=benchmark_term
                         ),
                         proxy=self._proxies["https"],
                     )
@@ -286,62 +340,125 @@ class FinraDataFetcher(DataFetcherBase):
                         trade_history_json["returnBody"]["data"]
                     )
                     df = pd.DataFrame(trade_data_json)
-                    if uid:
-                        return cusip, df, uid
-                    return cusip, df
+                    if cusip:
+                        if uid:
+                            return cusip, df, uid
+                        return cusip, df
+                    elif benchmark_term:
+                        if uid:
+                            return benchmark_term, df, uid
+                        return benchmark_term, df
+                    else:
+                        raise ValueError("One of 'cusip', 'benchmark_term' must be a parameter - (fetch_finra_cusip_trade_history)")
+                        
                 except aiohttp.ClientResponseError:
                     self._logger.error(
                         f"TRACE - Trade History Bad Status: {response.status}"
                     )
-                    if uid:
-                        return cusip, None, uid
-                    return cusip, None
+                    if cusip:
+                        if uid:
+                            return cusip, None, uid
+                        return cusip, None
+                    elif benchmark_term:
+                        if uid:
+                            return benchmark_term, None, uid
+                        return benchmark_term, None
+                    else:
+                        raise ValueError("One of 'cusip', 'benchmark_term' must be a parameter - (fetch_finra_cusip_trade_history)")
 
                 except Exception as e:
                     self._logger.error(f"TRACE - Trade History Error : {str(e)}")
-                    if uid:
-                        return cusip, None, uid
-                    return cusip, None
+                    if cusip:
+                        if uid:
+                            return cusip, None, uid
+                        return cusip, None
+                    elif benchmark_term:
+                        if uid:
+                            return benchmark_term, None, uid
+                        return benchmark_term, None
+                    else:
+                        raise ValueError("One of 'cusip', 'benchmark_term' must be a parameter - (fetch_finra_cusip_trade_history)")
 
             tasks = []
-            for cusip in cusips:
-                max_record_size = int(cusip_finra_api_payload_configs[cusip])
-                if max_record_size == -1:
-                    self._logger.debug(
-                        f"TRACE - {cusip} had -1 Max Record Size - Does it Exist?"
-                    )
-                    continue
-                num_reqs = math.ceil(max_record_size / 5000)
-                self._logger.debug(f"TRACE - {cusip} Reqs: {num_reqs}")
-                for i in range(1, num_reqs + 1):
-                    curr_offset = i * 5000
-                    if curr_offset > max_record_size:
-                        break
-                    tasks.append(
-                        fetch_finra_cusip_trade_history(
-                            session=session,
-                            cusip=cusip,
-                            start_date=start_date,
-                            end_date=end_date,
-                            offset=curr_offset,
+            if cusips:
+                for cusip in cusips:
+                    max_record_size = int(cusip_finra_api_payload_configs[cusip])
+                    if max_record_size == -1:
+                        self._logger.debug(
+                            f"TRACE - {cusip} had -1 Max Record Size - Does it Exist?"
                         )
-                    )
-
+                        continue
+                    num_reqs = math.ceil(max_record_size / 5000)
+                    self._logger.debug(f"TRACE - {cusip} Reqs: {num_reqs}")
+                    for i in range(0, num_reqs + 1):
+                        curr_offset = i * 5000
+                        offsets.append(curr_offset)
+                        # failing one on purpose
+                        # if curr_offset > max_record_size:
+                        #     curr_offset = max_record_size 
+                        tasks.append(
+                            fetch_finra_cusip_trade_history(
+                                session=session,
+                                cusip=cusip,
+                                start_date=start_date,
+                                end_date=end_date,
+                                offset=curr_offset,
+                            )
+                        )
+            elif benchmark_terms:
+                for benchmark_term in benchmark_terms:
+                    max_record_size = int(cusip_finra_api_payload_configs[benchmark_term])
+                    if max_record_size == -1:
+                        self._logger.debug(
+                            f"TRACE - {benchmark_term} had -1 Max Record Size - Does it Exist?"
+                        )
+                        continue
+                    num_reqs = math.ceil(max_record_size / 5000)
+                    self._logger.debug(f"TRACE - {benchmark_term} Reqs: {num_reqs}")
+                    offsets = []
+                    for i in range(0, num_reqs + 1):
+                        curr_offset = i * 5000
+                        offsets.append(curr_offset)
+                        # failing one on purpose
+                        # if curr_offset > max_record_size:
+                            # curr_offset = max_record_size 
+                        tasks.append(
+                            fetch_finra_cusip_trade_history(
+                                session=session,
+                                benchmark_term=benchmark_term,
+                                start_date=start_date,
+                                end_date=end_date,
+                                offset=curr_offset,
+                            )
+                        )                
+            else:
+                raise ValueError("One of 'cusip', 'benchmark_term' must be a parameter - (build_fetch_tasks_historical_trace_data)")
+            
+            self._logger.debug(f"LEN OF TASKS: {len(tasks)}") 
+            self._logger.debug(f"OFFSETS Used: {offsets}") 
             return tasks
 
         async def build_tasks(
             session: aiohttp.ClientSession,
             start_date: datetime,
             end_date: datetime,
-            cusips: List[str],
+            cusips: Optional[List[str]] = None,
+            benchmark_terms: Optional[List[Literal["1Y", "2Y", "3Y", "5Y", "7Y", "10Y" "20Y", "30Y"]]] = None,
         ):
             tasks = await build_fetch_tasks_historical_trace_data(
-                session=session, cusips=cusips, start_date=start_date, end_date=end_date
+                session=session, 
+                start_date=start_date, 
+                end_date=end_date,
+                cusips=cusips,
+                benchmark_terms=benchmark_terms 
             )
             return await asyncio.gather(*tasks)
 
         async def run_fetch_all(
-            start_date: datetime, end_date: datetime, cusips: List[str]
+            start_date: datetime, 
+            end_date: datetime, 
+            cusips: Optional[List[str]] = None,
+            benchmark_terms: Optional[List[Literal["1Y", "2Y", "3Y", "5Y", "7Y", "10Y" "20Y", "30Y"]]] = None,
         ):
             session_timeout = aiohttp.ClientTimeout(
                 total=None,
@@ -349,19 +466,20 @@ class FinraDataFetcher(DataFetcherBase):
                 sock_read=session_timeout_minutes * 60,
             )
             async with aiohttp.ClientSession(
-                timeout=session_timeout, proxy=self._proxies["https"]
+                timeout=session_timeout 
             ) as session:
                 all_data = await build_tasks(
                     session=session,
-                    cusips=cusips,
                     start_date=start_date,
                     end_date=end_date,
+                    cusips=cusips,
+                    benchmark_terms=benchmark_terms 
                 )
                 return all_data
 
         fetch_all_t1 = time.time()
         results: List[Tuple[str, pd.DataFrame]] = asyncio.run(
-            run_fetch_all(start_date=start_date, end_date=end_date, cusips=cusips)
+            run_fetch_all(start_date=start_date, end_date=end_date, cusips=cusips, benchmark_terms=benchmark_terms)
         )
         self._logger.info(
             f"TRACE - Fetch All Took: {time.time() - fetch_all_t1} seconds"

@@ -245,6 +245,7 @@ def run_pca_yield_curve(
                 "Date": df.index,
                 "PC1": data_fitted_transf_pca[:, 0],
                 # flipping signs here
+                # https://stackoverflow.com/questions/44765682/in-sklearn-decomposition-pca-why-are-components-negative
                 "PC2": -1 * data_fitted_transf_pca[:, 1],
                 "PC3": -1 * data_fitted_transf_pca[:, 2],
             }
