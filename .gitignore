@@ -134,3 +134,6 @@ temp.ipynb
 temp.py
 temp2.py
 working_paper.ipynb
+
+*.html
+!spec/*.html
