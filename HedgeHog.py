@@ -708,3 +708,7 @@ def beta_estimates(
     }
 
     return {"betas": beta_estimates, "regression_results": regression_results, "pc_exposures": pcs_exposures}
+
+
+def rolling_beta_estimates():
+    pass
