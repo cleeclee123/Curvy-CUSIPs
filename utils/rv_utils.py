@@ -23,7 +23,8 @@ import seaborn as sns
 from CurveDataFetcher import CurveDataFetcher
 from CurveInterpolator import GeneralCurveInterpolator
 from CurveBuilder import calc_ust_metrics
-from utils.viz import plot_residuals_timeseries, plot_usts, run_basic_linear_regression_df, run_rolling_regression_df
+from utils.ust_viz import plot_usts
+from utils.regression_utils import run_basic_linear_regression, run_basic_linear_regression_df, plot_residuals_timeseries, run_rolling_regression_df
 
 sns.set(style="whitegrid", palette="dark")
 

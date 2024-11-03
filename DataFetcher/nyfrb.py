@@ -9,7 +9,7 @@ import requests
 
 from DataFetcher.base import DataFetcherBase
 
-from utils.utils import build_treasurydirect_header
+from utils.ust_utils import build_treasurydirect_header
 
 warnings.filterwarnings("ignore", category=pd.errors.SettingWithCopyWarning)
 warnings.simplefilter(action="ignore", category=FutureWarning)

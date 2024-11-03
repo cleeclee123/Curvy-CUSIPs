@@ -29,7 +29,7 @@ from DataFetcher.wsj import WSJDataFetcher
 from DataFetcher.yf import YahooFinanceDataFetcher
 from utils.QL_BondPricer import QL_BondPricer
 from utils.RL_BondPricer import RL_BondPricer
-from utils.utils import get_active_cusips, get_last_n_off_the_run_cusips, is_valid_ust_cusip, ust_labeler, ust_sorter, NoneReturningSpline
+from utils.ust_utils import get_active_cusips, get_last_n_off_the_run_cusips, is_valid_ust_cusip, ust_labeler, ust_sorter, NoneReturningSpline
 
 warnings.filterwarnings("ignore", category=pd.errors.SettingWithCopyWarning)
 warnings.simplefilter(action="ignore", category=FutureWarning)
@@ -269,7 +269,7 @@ class CurveDataFetcher:
     def fetch_historical_curve_sets(
         self,
         start_date: datetime,
-        end_date: datetime,
+        end_date: Optional[datetime] = None,
         fetch_soma_holdings: Optional[bool] = False,
         fetch_stripping_data: Optional[bool] = False,
         calc_free_float: Optional[bool] = False,
@@ -278,6 +278,9 @@ class CurveDataFetcher:
         max_connections: Optional[int] = 64,
         sorted_curve_set: Optional[bool] = False, 
     ) -> Tuple[Dict[datetime, pd.DataFrame], Dict[datetime, Dict[str, GeneralCurveInterpolator]]]:
+        if not end_date:
+            end_date = start_date
+            
         if calc_free_float:
             fetch_soma_holdings = True
             fetch_stripping_data = True

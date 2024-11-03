@@ -11,7 +11,7 @@ import scipy.interpolate
 from pandas.tseries.offsets import BDay
 
 from CurveDataFetcher import CurveDataFetcher
-from utils.utils import pydatetime_to_quantlib_date, quantlib_date_to_pydatetime, to_quantlib_fixed_rate_bond_obj
+from utils.ust_utils import pydatetime_to_quantlib_date, quantlib_date_to_pydatetime, to_quantlib_fixed_rate_bond_obj
 
 warnings.filterwarnings("ignore", category=pd.errors.SettingWithCopyWarning)
 warnings.simplefilter(action="ignore", category=FutureWarning)
