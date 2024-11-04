@@ -18,7 +18,7 @@ from utils.regression_utils import run_odr
 from utils.arbitragelab import JohansenPortfolio, construct_spread, EngleGrangerPortfolio
 
 
-def dv01_neutral_steepener_hegde_ratio(
+def dv01_neutral_curve_hegde_ratio(
     as_of_date: datetime,
     front_leg_bond_row: Dict | pd.Series,
     back_leg_bond_row: Dict | pd.Series,
@@ -74,7 +74,7 @@ def dv01_neutral_steepener_hegde_ratio(
 
     if front_leg_bond_row["rank"] == 0 and back_leg_bond_row["rank"] == 0:
         print(f"{front_leg_bond_row["original_security_term"].split("-")[0]}s{back_leg_bond_row["original_security_term"].split("-")[0]}s")
-    print(f"{back_leg_bond_row["ust_label"]} - {front_leg_bond_row["ust_label"]}") if verbose else None
+    print(f"{front_leg_bond_row["ust_label"]} / {back_leg_bond_row["ust_label"]}") if verbose else None
 
     hr = back_leg_metrics["bps"] / front_leg_metrics["bps"]
     print(colored(f"BPV Neutral Hedge Ratio: {hr}", "light_blue")) if verbose else None
@@ -110,9 +110,19 @@ def dv01_neutral_steepener_hegde_ratio(
             f"Back Leg: {back_leg_bond_row["ust_label"]} (OST {back_leg_bond_row["original_security_term"]}, TTM = {back_leg_bond_row["time_to_maturity"]:3f}) Par Amount = {back_leg_par_amount:_}"
         )
         print(f"Total Trade Par Amount: {front_leg_par_amount + back_leg_par_amount:_}")
+        risk_weight = (front_leg_par_amount * front_leg_metrics["bps"] / 100) / (back_leg_par_amount * back_leg_metrics["bps"] / 100)
+        print(f"Risk Weights: {risk_weight:3f} : 100")
 
     return {
-        "curr_spread": (back_leg_bond_row[f"{quote_type}_yield"] - front_leg_bond_row[f"{quote_type}_yield"]) * 100,
+        "current_spread": (back_leg_bond_row[f"{quote_type}_yield"] - front_leg_bond_row[f"{quote_type}_yield"]) * 100,
+        "current_bpv_neutral_spread": (
+            back_leg_bond_row[f"{quote_type}_yield"]
+            - (front_leg_bond_row[f"{quote_type}_yield"] * (back_leg_metrics["bps"] / front_leg_metrics["bps"]))
+        )
+        * 100,
+        "current_beta_weighted_spread": (
+            (back_leg_bond_row[f"{quote_type}_yield"] - (front_leg_bond_row[f"{quote_type}_yield"] * hr)) * 100 if yvx_beta_adjustment else None
+        ),
         "rough_3m_impl_fwd_spread": (impl_spot_3m_fwds(back_leg_ttm) - impl_spot_3m_fwds(front_leg_ttm)) * 100,
         "rough_6m_impl_fwd_spread": (impl_spot_6m_fwds(back_leg_ttm) - impl_spot_6m_fwds(front_leg_ttm)) * 100,
         "rough_12m_impl_fwd_spread": (impl_spot_12m_fwds(back_leg_ttm) - impl_spot_12m_fwds(front_leg_ttm)) * 100,
@@ -265,6 +275,13 @@ def dv01_neutral_butterfly_hegde_ratio(
             f"Back Wing: {back_wing_bond_row["ust_label"]} (OST {back_wing_bond_row["original_security_term"]}, TTM = {back_wing_bond_row["time_to_maturity"]:3f}) Par Amount = {back_wing_par_amount:_}"
         )
         print(f"Total Trade Par Amount: {front_wing_par_amount + belly_par_amount + back_wing_par_amount:_}")
+        (
+            print(
+                f"Risk Weights - Front Wing: {yvx_front_wing_beta_adjustment:.3%}, Back Wing: {yvx_back_wing_beta_adjustment:.3%}, Sum: {yvx_front_wing_beta_adjustment + yvx_back_wing_beta_adjustment:.3%}"
+            )
+            if yvx_front_wing_beta_adjustment and yvx_back_wing_beta_adjustment
+            else None
+        )
 
     return {
         "curr_spread": (
@@ -408,7 +425,7 @@ def get_minimum_hl_hedge_ratio(price_data: pd.DataFrame, dependent_variable: str
     y = price_data[dependent_variable].copy()
     initial_guess = (y[0] / X).mean().values
     result = minimize(_min_hl_function, x0=initial_guess, method="BFGS", tol=1e-5, args=(X, y))
-    
+
     if result.status != 0:
         warnings.warn("Minimum Half Life Optimization failed to converge. Please check output hedge ratio! The result can be unstable!")
 
@@ -445,7 +462,7 @@ def get_adf_optimal_hedge_ratio(price_data: pd.DataFrame, dependent_variable: st
     y = price_data[dependent_variable].copy()
     initial_guess = (y[0] / X).mean().values
     result = minimize(_min_adf_stat, x0=initial_guess, method="BFGS", tol=1e-5, args=(X, y))
-    
+
     if result.status != 0:
         warnings.warn("ADF Optimization failed to converge. Please check output hedge ratio! The result can be unstable!")
 
@@ -473,7 +490,7 @@ def beta_estimates(
     y_errs: Optional[npt.ArrayLike] = None,
     pc_scores_df: Optional[pd.DataFrame] = None,
     loadings_df: Optional[pd.DataFrame] = None,
-) -> Dict: 
+) -> Dict:
     df = df[["Date"] + x_cols + [y_col]].copy()
     df_level = df.copy()
 
@@ -494,16 +511,16 @@ def beta_estimates(
     if loadings_df is not None:
         ep_x0_pc1 = loadings_df.loc[x_cols[0], "PC1"]
         ep_x0_pc2 = loadings_df.loc[x_cols[0], "PC2"]
-        ep_x0_pc3 = loadings_df.loc[x_cols[0], "PC3"]
+        ep_x0_pc3 = loadings_df.loc[x_cols[0], "PC3"] if len(x_cols) > 1 else None
 
         ep_y_pc1 = loadings_df.loc[y_col, "PC1"]
         ep_y_pc2 = loadings_df.loc[y_col, "PC2"]
-        ep_y_pc3 = loadings_df.loc[y_col, "PC3"]
+        ep_y_pc3 = loadings_df.loc[y_col, "PC3"] if len(x_cols) > 1 else None
 
         if len(x_cols) > 1:
             ep_x1_pc1 = loadings_df.loc[x_cols[1], "PC1"]
             ep_x1_pc2 = loadings_df.loc[x_cols[1], "PC2"]
-            ep_x1_pc3 = loadings_df.loc[x_cols[1], "PC3"]
+            ep_x1_pc3 = loadings_df.loc[x_cols[1], "PC3"] if len(x_cols) > 1 else None
 
             # see  Doug Huggins, Christian Schaller Fixed Income Relative Value Analysis ed2 page 76 APPROPRIATE HEDGING
             r"""
@@ -571,7 +588,7 @@ def beta_estimates(
     pcs_exposures = {
         "pcr_pc1_exposure": regression_results["pcr_pc1"].params[1] if pc_scores_df is not None else None,
         "pcr_pc2_exposure": regression_results["pcr_pc2"].params[1] if pc_scores_df is not None else None,
-        "pcr_pc3_exposure": regression_results["pcr_pc3"].params[1] if pc_scores_df is not None else None,
+        "pcr_pc3_exposure": regression_results["pcr_pc3"].params[1] if pc_scores_df is not None and len(x_cols) > 1 else None,
         # checking 50-50 duration - if non-zero => exposures exists
         "epsilon_pc1_loadings_exposure": (
             ep_y_pc1 - (ep_x0_pc1 + ep_x1_pc1) / 2.0 if len(x_cols) > 1 else ep_x0_pc1 - ep_y_pc1 if loadings_df is not None else None
@@ -580,7 +597,9 @@ def beta_estimates(
             ep_y_pc2 - (ep_x0_pc2 + ep_x1_pc2) / 2.0 if len(x_cols) > 1 else ep_x0_pc2 - ep_y_pc2 if loadings_df is not None else None
         ),
         "epsilon_pc3_loadings_exposure": (
-            ep_y_pc3 - (ep_x0_pc3 + ep_x1_pc3) / 2.0 if len(x_cols) > 1 else ep_x0_pc3 - ep_y_pc3 if loadings_df is not None else None
+            (ep_y_pc3 - (ep_x0_pc3 + ep_x1_pc3) / 2.0 if len(x_cols) > 1 else ep_x0_pc3 - ep_y_pc3 if loadings_df is not None else None)
+            if len(x_cols) > 1
+            else None
         ),
     }
 
@@ -590,5 +609,3 @@ def beta_estimates(
 # TODO
 def rolling_beta_estimates():
     pass
-
-

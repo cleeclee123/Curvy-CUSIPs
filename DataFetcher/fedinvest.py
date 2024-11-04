@@ -462,7 +462,7 @@ class FedInvestDataFetcher(DataFetcherBase):
         end_date: Optional[datetime] = None,
         max_concurrent_tasks: int = 64,
         max_keepalive_connections: int = 5,
-        to_df_col: Optional[str] = None,
+        to_df_cols: Optional[List[str]] = None,
         use_dict_key_df_cols: Optional[bool] = False,
         df_col_delimitter: Optional[str] = "-",
     ):
@@ -496,10 +496,10 @@ class FedInvestDataFetcher(DataFetcherBase):
         results: List[Tuple[str, pd.DataFrame]] = asyncio.run(run_fetch_all(cusips=cusips))
         results_dict: Dict[str, pd.DataFrame] = {dt: df for dt, df in results if dt is not None and df is not None}
 
-        if to_df_col:
+        if to_df_cols:
             renamed_dfs = []
             for key, df in results_dict.items():
-                temp_df = df[["Date", to_df_col]].copy()
+                temp_df = df[["Date"] + to_df_cols].copy()
                 if use_dict_key_df_cols:
                     temp_df = temp_df.rename(columns={col: f"{key}" for col in temp_df.columns if col != "Date"})
                 else:

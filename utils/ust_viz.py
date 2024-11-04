@@ -271,7 +271,7 @@ def plot_usts(
     linspace_num: Optional[int] = 1000,
     y_axis_range: Optional[Annotated[List[int], 2]] = [3.33, 5.5],
     plot_height=1000,
-    plot_width=1500,
+    plot_width=None,
 ):
     curve_set_df = curve_set_df.copy()
 

@@ -40,6 +40,7 @@ def cusip_spread_rv_regression(
     label2: str,
     cusip_timeseries: Dict[str, List[Dict[str, str | float | int]]],
     fitted_splines_timeseries_dict: Dict[str, Dict[datetime, Callable]],
+    on_rate: float,
     benchmark_tenor_1: Optional[int] = None,
     benchmark_tenor_2: Optional[int] = None,
     date_subset: Optional[Tuple[datetime, datetime]] = None,
@@ -212,6 +213,7 @@ def cusip_spread_rv_regression(
                 curr_ytm=row["eod_yield"],
                 as_of_date=row["Date"],
                 scipy_interp=row[interp_func_key],
+                on_rate=on_rate,
             )
         )
     cusip1_metrics_df = pd.DataFrame(cusip1_metrics)
@@ -225,6 +227,7 @@ def cusip_spread_rv_regression(
                 curr_ytm=row["eod_yield"],
                 as_of_date=row["Date"],
                 scipy_interp=row[interp_func_key],
+                on_rate=on_rate,
             )
         )
     cusip2_metrics_df = pd.DataFrame(cusip2_metrics)
@@ -239,17 +242,18 @@ def cusip_spread_rv_regression(
     plt.grid(True)
     plt.show()
 
-    plt.figure(figsize=(20, 10))
-    plt.plot(cusip1_metrics_df["Date"], cusip1_metrics_df["3m_carry_and_roll"], label=f"{label1} 3m Carry & Roll")
-    plt.plot(cusip1_metrics_df["Date"], cusip1_metrics_df["12m_carry_and_roll"], label=f"{label1} 12m Carry & Roll")
-    plt.plot(cusip2_metrics_df["Date"], cusip2_metrics_df["3m_carry_and_roll"], label=f"{label2} 3m Carry & Roll")
-    plt.plot(cusip2_metrics_df["Date"], cusip2_metrics_df["12m_carry_and_roll"], label=f"{label2} 12m Carry & Roll")
-    plt.xlabel("Date")
-    plt.ylabel("Yield (bps)")
-    plt.title(f"{label1} vs {label2} Carry & Roll Profiles", fontdict={"fontsize": "x-large"})
-    plt.legend(fontsize="x-large")
-    plt.grid(True)
-    plt.show()
+    # TODO FIXED THIS
+    # plt.figure(figsize=(20, 10))
+    # plt.plot(cusip1_metrics_df["Date"], cusip1_metrics_df["3m_carry_and_roll"], label=f"{label1} 3m Carry & Roll")
+    # plt.plot(cusip1_metrics_df["Date"], cusip1_metrics_df["12m_carry_and_roll"], label=f"{label1} 12m Carry & Roll")
+    # plt.plot(cusip2_metrics_df["Date"], cusip2_metrics_df["3m_carry_and_roll"], label=f"{label2} 3m Carry & Roll")
+    # plt.plot(cusip2_metrics_df["Date"], cusip2_metrics_df["12m_carry_and_roll"], label=f"{label2} 12m Carry & Roll")
+    # plt.xlabel("Date")
+    # plt.ylabel("Yield (bps)")
+    # plt.title(f"{label1} vs {label2} Carry & Roll Profiles", fontdict={"fontsize": "x-large"})
+    # plt.legend(fontsize="x-large")
+    # plt.grid(True)
+    # plt.show()
 
     plt.figure(figsize=(20, 10))
     clean_price_spread_1 = cusip1_metrics_df["clean_price"] - cusip1_metrics_df["zspread_impl_clean_price"]

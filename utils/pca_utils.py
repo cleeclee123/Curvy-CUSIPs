@@ -75,7 +75,12 @@ def calc_pca_loadings_matrix(
     else:
         loadings_df = pd.DataFrame(pca.components_.T, index=df.columns, columns=[f"PC{i+1}" for i in range(len(df.columns))])
 
-    return {"pca": pca, "loading_matrix": loadings_df, "pc_scores_matrix": pc_scores_df}
+    return {
+        "pca": pca,
+        "loading_matrix": loadings_df,
+        "pc_scores_matrix": pc_scores_df,
+        "covar_matrix": pd.DataFrame(pca.get_covariance(), index=df.columns, columns=df.columns),
+    }
 
 
 def split_dates_into_ranges(dates: List[datetime]) -> List[List[datetime]]:
@@ -179,6 +184,7 @@ CS PCA Note:
 """
 # BIG TODO break this function up!
 
+
 def run_pca_yield_curve(
     df: pd.DataFrame,
     date_subset_range: Annotated[List[datetime], 2] | None = None,
@@ -206,7 +212,7 @@ def run_pca_yield_curve(
     show_clusters: Optional[bool] = False,
     num_clusters=8,
     overlay_df: Optional[pd.DataFrame] = None,
-    to_overlay_pcs_v_time_cols: Optional[Annotated[List[str], 3]] = None
+    to_overlay_pcs_v_time_cols: Optional[Annotated[List[str], 3]] = None,
 ):
     df = df.copy()
     if date_subset_range:
@@ -237,7 +243,7 @@ def run_pca_yield_curve(
         explained_variance = pca.explained_variance_ratio_
         to_return_dict["cumulative_explained_variance"] = cumulative_explained_variance
         to_return_dict["explained_variance"] = explained_variance
-        
+
         _, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10))
         ax1.plot(cumulative_explained_variance, marker="o")
         ax1.set_xlabel("Number of Components")
@@ -410,8 +416,8 @@ def run_pca_yield_curve(
                 aspectratio=dict(x=2, y=2, z=1),
             ),
             title="Interactive 3D PCA Biplot of CT Yields",
-            height=1050,
-            width=1400,
+            height=1000,
+            # width=1400,
             template="plotly_dark",
         )
         data = traces + vectors
@@ -473,7 +479,7 @@ def run_pca_yield_curve(
                 "color": "red",
             },
         ]
-        
+
         opp_colors = {
             "blue": "blueviolet",
             "green": "cyan",
@@ -542,14 +548,14 @@ def run_pca_yield_curve(
 
             axes[i].set_title(f"PC{i+1} over Time")
             axes[i].set_ylabel(f"PC{i+1} Score", color=pca_container[i]["color"])
-            
-            if to_overlay_pcs_v_time_cols and overlay_df is not None: 
+
+            if to_overlay_pcs_v_time_cols and overlay_df is not None:
                 lines, labels = axes[i].get_legend_handles_labels()
                 lines2, labels2 = ax2.get_legend_handles_labels()
                 ax2.legend(lines + lines2, labels + labels2, loc=0)
             else:
                 axes[i].legend()
-            
+
             axes[i].grid(True)
 
         plt.tight_layout()
