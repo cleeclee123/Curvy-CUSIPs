@@ -27,6 +27,7 @@ from DataFetcher.public_dotcom import PublicDotcomDataFetcher
 from DataFetcher.ust import USTreasuryDataFetcher
 from DataFetcher.wsj import WSJDataFetcher
 from DataFetcher.yf import YahooFinanceDataFetcher
+from DataFetcher.bbg_sef import BBGSEF_DataFetcher
 from utils.QL_BondPricer import QL_BondPricer
 from utils.RL_BondPricer import RL_BondPricer
 from utils.ust_utils import get_active_cusips, get_last_n_off_the_run_cusips, is_valid_ust_cusip, ust_labeler, ust_sorter, NoneReturningSpline
@@ -190,6 +191,14 @@ class CurveDataFetcher:
             info_verbose=info_verbose,
             error_verbose=error_verbose,
         )
+        
+        self.bbg_sef_fetcher = BBGSEF_DataFetcher(
+            global_timeout=global_timeout,
+            proxies=proxies,
+            debug_verbose=debug_verbose,
+            info_verbose=info_verbose,
+            error_verbose=error_verbose,
+        ) 
 
     @staticmethod
     def par_bond_equation(c, maturity, zero_curve_func):

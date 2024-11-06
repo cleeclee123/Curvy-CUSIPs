@@ -1,16 +1,16 @@
-from datetime import datetime
-import pandas as pd
-import ujson as json
 import asyncio
 import warnings
 from datetime import datetime
+from functools import reduce
 from typing import Dict, List, Optional, Tuple
-from requests.models import PreparedRequest
 
 import httpx
 import pandas as pd
+import ujson as json
+from requests.models import PreparedRequest
 
 from DataFetcher.base import DataFetcherBase
+
 warnings.simplefilter(action="ignore", category=FutureWarning)
 
 import sys
@@ -110,24 +110,19 @@ class WSJDataFetcher(DataFetcherBase):
                     response = await client.get(prep_url.url, headers=headers)
                     response.raise_for_status()
                     json_data = response.json()
-                    df = pd.DataFrame({
-                        "Date": json_data["TimeInfo"]["Ticks"],
-                        wsj_ticker_key:[d[0] for d in json_data["Series"][0]["DataPoints"]]
-                    })
+                    df = pd.DataFrame({"Date": json_data["TimeInfo"]["Ticks"], wsj_ticker_key: [d[0] for d in json_data["Series"][0]["DataPoints"]]})
                     df["Date"] = pd.to_datetime(df["Date"], unit="ms")
                     if start_date:
                         df = df[df["Date"] >= start_date]
                     if end_date:
                         df = df[df["Date"] <= end_date]
-                        
+
                     if uid:
                         return wsj_ticker_key, df, uid
                     return wsj_ticker_key, df
-                    
+
                 except httpx.HTTPStatusError as e:
-                    self._logger.error(
-                        f"WSJ - Bad Status: {response.status_code}"
-                    )
+                    self._logger.error(f"WSJ - Bad Status: {response.status_code}")
                     if response.status_code == 404:
                         if uid:
                             return wsj_ticker_key, pd.DataFrame(columns=cols_to_return), uid
@@ -135,18 +130,14 @@ class WSJDataFetcher(DataFetcherBase):
 
                     retries += 1
                     wait_time = backoff_factor * (2 ** (retries - 1))
-                    self._logger.debug(
-                        f"WSJ- Throttled for {wsj_ticker_key}. Waiting for {wait_time} seconds before retrying..."
-                    )
+                    self._logger.debug(f"WSJ- Throttled for {wsj_ticker_key}. Waiting for {wait_time} seconds before retrying...")
                     await asyncio.sleep(wait_time)
 
                 except Exception as e:
                     self._logger.error(f"WSJ - Error: {str(e)}")
                     retries += 1
                     wait_time = backoff_factor * (2 ** (retries - 1))
-                    self._logger.debug(
-                        f"WSJ - Throttled for {wsj_ticker_key}. Waiting for {wait_time} seconds before retrying..."
-                    )
+                    self._logger.debug(f"WSJ - Throttled for {wsj_ticker_key}. Waiting for {wait_time} seconds before retrying...")
                     await asyncio.sleep(wait_time)
 
             raise ValueError(f"WSJ  - Max retries exceeded for {wsj_ticker_key}")
@@ -157,9 +148,7 @@ class WSJDataFetcher(DataFetcherBase):
                 return wsj_ticker_key, pd.DataFrame(columns=cols_to_return), uid
             return wsj_ticker_key, pd.DataFrame(columns=cols_to_return)
 
-    async def _fetch_timeseries_with_semaphore(
-        self, semaphore, *args, **kwargs
-    ):
+    async def _fetch_timeseries_with_semaphore(self, semaphore, *args, **kwargs):
         async with semaphore:
             return await self._fetch_timeseries(*args, **kwargs)
 
@@ -169,6 +158,7 @@ class WSJDataFetcher(DataFetcherBase):
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
         max_concurrent_tasks: int = 64,
+        merge_into_one_df: Optional[bool] = False,
     ):
         async def build_tasks(
             client: httpx.AsyncClient,
@@ -210,4 +200,9 @@ class WSJDataFetcher(DataFetcherBase):
                 end_date=end_date,
             )
         )
+
+        if merge_into_one_df:
+            merge_dfs_on_column = lambda dfs_dict, on_column: reduce(lambda left, right: pd.merge(left, right, on=on_column), dfs_dict.values())
+            return merge_dfs_on_column(dict(dfs), "Date")
+
         return dict(dfs)
