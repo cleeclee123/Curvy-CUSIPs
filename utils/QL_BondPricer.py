@@ -12,40 +12,17 @@ class QL_BondPricer:
     def _pydatetime_to_qldate(date: datetime) -> ql.Date:
         return ql.Date(date.day, date.month, date.year)
 
-    # @staticmethod
-    # def _bill_price_to_ytm(
-    #     maturity_date: datetime, as_of: datetime, price: float
-    # ) -> float:
-    #     maturity_ql_date = QL_BondPricer._pydatetime_to_qldate(maturity_date)
-    #     settlement_date = (
-    #         pd.to_datetime(as_of) + pd.tseries.offsets.BDay(1)
-    #     ).to_pydatetime()
-    #     settlement_ql_date = QL_BondPricer._pydatetime_to_qldate(settlement_date)
-    #     day_count = ql.Actual360()
-    #     bond = ql.ZeroCouponBond(
-    #         1, ql.UnitedStates(ql.UnitedStates.GovernmentBond), 100, maturity_ql_date
-    #     )
-    #     ytm = bond.bondYield(price, day_count, ql.Simple, ql.Once, settlement_ql_date)
-    #     return ytm * 100
     @staticmethod
-    def _bill_price_to_ytm(
-        maturity_date: datetime, as_of: datetime, price: float
-    ) -> float:
-        maturity_ql_date = QL_BondPricer._pydatetime_to_qldate(maturity_date)
-        settlement_date = (
-            pd.to_datetime(as_of) + pd.tseries.offsets.BDay(1)
-        ).to_pydatetime()
-        settlement_ql_date = QL_BondPricer._pydatetime_to_qldate(settlement_date)
-        day_count = ql.Actual360()
-        face_value = 100.0
-        bond = ql.ZeroCouponBond(
-            1,
-            ql.UnitedStates(ql.UnitedStates.GovernmentBond),
-            face_value,
-            maturity_ql_date,
-        )
-        ytm = bond.bondYield(price, day_count, ql.Simple, ql.Once, settlement_ql_date)
-        return ytm * 100
+    def _bill_price_to_ytm(maturity_date: datetime, as_of: datetime, price: float) -> float:
+        settlement_date = (pd.to_datetime(as_of) + pd.tseries.offsets.BDay(0)).to_pydatetime()
+        t = (maturity_date - settlement_date).days
+        if t <= 0:
+            return np.nan
+
+        F = 100.0
+        HPY = (F - price) / price
+        BEY = HPY * (365 / t)
+        return BEY * 100
 
     @staticmethod
     def _coupon_bond_price_to_ytm(
@@ -57,9 +34,7 @@ class QL_BondPricer:
     ) -> float:
         issue_ql_date = QL_BondPricer._pydatetime_to_qldate(issue_date)
         maturity_ql_date = QL_BondPricer._pydatetime_to_qldate(maturity_date)
-        settlement_date = (
-            pd.to_datetime(as_of) + pd.tseries.offsets.BDay(1)
-        ).to_pydatetime()
+        settlement_date = (pd.to_datetime(as_of) + pd.tseries.offsets.BDay(1)).to_pydatetime()
         settlement_ql_date = QL_BondPricer._pydatetime_to_qldate(settlement_date)
 
         clean_price = price
@@ -78,15 +53,9 @@ class QL_BondPricer:
         )
 
         settlement_days = 1
-        bond = ql.FixedRateBond(
-            settlement_days, 100.0, schedule, [coupon_rate], day_count
-        )
+        bond = ql.FixedRateBond(settlement_days, 100.0, schedule, [coupon_rate], day_count)
         bond_price_handle = ql.QuoteHandle(ql.SimpleQuote(clean_price))
-        bond_engine = ql.DiscountingBondEngine(
-            ql.YieldTermStructureHandle(
-                ql.FlatForward(settlement_ql_date, 0.0, day_count)
-            )
-        )
+        bond_engine = ql.DiscountingBondEngine(ql.YieldTermStructureHandle(ql.FlatForward(settlement_ql_date, 0.0, day_count)))
         bond.setPricingEngine(bond_engine)
         ytm = bond.bondYield(
             bond_price_handle.currentLink().value(),
