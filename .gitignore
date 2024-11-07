@@ -137,3 +137,5 @@ working_paper.ipynb
 
 *.html
 !spec/*.html
+
+__pycache__
