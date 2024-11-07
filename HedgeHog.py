@@ -79,7 +79,7 @@ def dv01_neutral_curve_hegde_ratio(
     hr = back_leg_metrics["bps"] / front_leg_metrics["bps"]
     print(colored(f"BPV Neutral Hedge Ratio: {hr}", "light_blue")) if verbose else None
     if yvx_beta_adjustment:
-        print(colored(f"Beta Weighted Hedge Ratio: {hr * yvx_beta_adjustment:3f}", "light_magenta")) if verbose else None
+        (print(colored(f"Beta Weighted Hedge Ratio: {hr * yvx_beta_adjustment:3f}", "light_magenta")) if verbose else None)
         hr = hr * yvx_beta_adjustment
 
     if total_trade_par_amount is not None:
@@ -129,7 +129,7 @@ def dv01_neutral_curve_hegde_ratio(
         "front_leg_metrics": front_leg_metrics,
         "back_leg_metrics": back_leg_metrics,
         "bpv_hedge_ratio": back_leg_metrics["bps"] / front_leg_metrics["bps"],
-        "beta_weighted_hedge_ratio": (back_leg_metrics["bps"] / front_leg_metrics["bps"]) * yvx_beta_adjustment if yvx_beta_adjustment else None,
+        "beta_weighted_hedge_ratio": ((back_leg_metrics["bps"] / front_leg_metrics["bps"]) * yvx_beta_adjustment if yvx_beta_adjustment else None),
         "front_leg_par_amount": front_leg_par_amount,
         "back_leg_par_amount": back_leg_par_amount,
         "spread_dv01": np.abs(back_leg_metrics["bps"] * back_leg_par_amount / 100),
@@ -229,7 +229,7 @@ def dv01_neutral_butterfly_hegde_ratio(
                 f"{front_wing_bond_row["original_security_term"].split("-")[0]}s{belly_bond_row["original_security_term"].split("-")[0]}s{back_wing_bond_row["original_security_term"].split("-")[0]}s"
             )
 
-        print(f"{front_wing_bond_row["ust_label"]} - {belly_bond_row["ust_label"]} - {back_wing_bond_row["ust_label"]} Fly") if verbose else None
+        (print(f"{front_wing_bond_row["ust_label"]} - {belly_bond_row["ust_label"]} - {back_wing_bond_row["ust_label"]} Fly") if verbose else None)
         print(colored(f"BPV Neutral Hedge Ratio:", "light_blue")) if verbose else None
         print(json.dumps(hedge_ratios, indent=4)) if verbose else None
 
@@ -309,7 +309,7 @@ def dv01_neutral_butterfly_hegde_ratio(
             "belly_hr": 1,
             "back_wing_hr": belly_metrics["bps"] / back_wing_metrics["bps"] / 2,
         },
-        "beta_weighted_hedge_ratio": hedge_ratios if yvx_front_wing_beta_adjustment and yvx_back_wing_beta_adjustment else None,
+        "beta_weighted_hedge_ratio": (hedge_ratios if yvx_front_wing_beta_adjustment and yvx_back_wing_beta_adjustment else None),
         "front_wing_par_amount": front_wing_par_amount,
         "belly_par_amount": belly_par_amount,
         "back_leg_par_amount": back_wing_par_amount,
@@ -543,7 +543,12 @@ def beta_estimates(
                         \end{pmatrix}
                     $$
             """
-            pc1_beta = list(np.dot(np.linalg.inv(np.array([[ep_x0_pc1, ep_x1_pc1], [ep_x0_pc2, ep_x1_pc2]])), np.array([ep_y_pc1, ep_y_pc2])))
+            pc1_beta = list(
+                np.dot(
+                    np.linalg.inv(np.array([[ep_x0_pc1, ep_x1_pc1], [ep_x0_pc2, ep_x1_pc2]])),
+                    np.array([ep_y_pc1, ep_y_pc2]),
+                )
+            )
         else:
             pc1_beta = ep_y_pc1 / ep_x0_pc1
 
@@ -558,21 +563,21 @@ def beta_estimates(
         "ols": sm.OLS(df[y_col], sm.add_constant(df[x_cols])).fit(),
         "tls": run_odr(df=df, x_cols=x_cols, y_col=y_col, x_errs=None, y_errs=None),
         # ODR becomes TLS if errors not specified
-        "odr": run_odr(df=df, x_cols=x_cols, y_col=y_col, x_errs=x_errs, y_errs=y_errs) if x_errs is not None or y_errs is not None else None,
+        "odr": (run_odr(df=df, x_cols=x_cols, y_col=y_col, x_errs=x_errs, y_errs=y_errs) if x_errs is not None or y_errs is not None else None),
         "box_tiao": get_box_tiao_hedge_ratio(df_level[["Date"] + x_cols + [y_col]].set_index("Date"), dependent_variable=y_col),
         "johansen": get_johansen_hedge_ratio(df_level[["Date"] + x_cols + [y_col]].set_index("Date"), dependent_variable=y_col),
         "minimum_half_life": get_minimum_hl_hedge_ratio(df_level[["Date"] + x_cols + [y_col]].set_index("Date"), dependent_variable=y_col),
         "adf_optimal": get_adf_optimal_hedge_ratio(df_level[["Date"] + x_cols + [y_col]].set_index("Date"), dependent_variable=y_col),
-        "pcr_pc1": sm.OLS(df["spread"].to_numpy(), sm.add_constant(pc_scores_df["PC1"].to_numpy())).fit() if pc_scores_df is not None else None,
-        "pcr_pc2": sm.OLS(df["spread"].to_numpy(), sm.add_constant(pc_scores_df["PC2"].to_numpy())).fit() if pc_scores_df is not None else None,
-        "pcr_pc3": sm.OLS(df["spread"].to_numpy(), sm.add_constant(pc_scores_df["PC3"].to_numpy())).fit() if pc_scores_df is not None else None,
+        "pcr_pc1": (sm.OLS(df["spread"].to_numpy(), sm.add_constant(pc_scores_df["PC1"].to_numpy())).fit() if pc_scores_df is not None else None),
+        "pcr_pc2": (sm.OLS(df["spread"].to_numpy(), sm.add_constant(pc_scores_df["PC2"].to_numpy())).fit() if pc_scores_df is not None else None),
+        "pcr_pc3": (sm.OLS(df["spread"].to_numpy(), sm.add_constant(pc_scores_df["PC3"].to_numpy())).fit() if pc_scores_df is not None else None),
     }
 
     beta_estimates = {
         "ols": (
             regression_results["ols"].params[1] if len(x_cols) == 1 else [regression_results["ols"].params[1], regression_results["ols"].params[2]]
         ),
-        "tls": regression_results["tls"].beta[1] if len(x_cols) == 1 else [regression_results["tls"].beta[1], regression_results["tls"].beta[2]],
+        "tls": (regression_results["tls"].beta[1] if len(x_cols) == 1 else [regression_results["tls"].beta[1], regression_results["tls"].beta[2]]),
         "odr": (
             regression_results["odr"].beta[1]
             if (x_errs is not None or y_errs is not None) and len(x_cols) == 1
@@ -588,7 +593,7 @@ def beta_estimates(
     pcs_exposures = {
         "pcr_pc1_exposure": regression_results["pcr_pc1"].params[1] if pc_scores_df is not None else None,
         "pcr_pc2_exposure": regression_results["pcr_pc2"].params[1] if pc_scores_df is not None else None,
-        "pcr_pc3_exposure": regression_results["pcr_pc3"].params[1] if pc_scores_df is not None and len(x_cols) > 1 else None,
+        "pcr_pc3_exposure": (regression_results["pcr_pc3"].params[1] if pc_scores_df is not None and len(x_cols) > 1 else None),
         # checking 50-50 duration - if non-zero => exposures exists
         "epsilon_pc1_loadings_exposure": (
             ep_y_pc1 - (ep_x0_pc1 + ep_x1_pc1) / 2.0 if len(x_cols) > 1 else ep_x0_pc1 - ep_y_pc1 if loadings_df is not None else None
