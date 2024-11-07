@@ -323,3 +323,18 @@ class BBGSEF_DataFetcher(DataFetcherBase):
         spreads_df = sofr_swaps_df[swaps_cols].values - ct_yields_df[ct_cols].values
         spreads_df = pd.DataFrame(spreads_df, index=common_dates, columns=[f"{swp} Spread" for swp in swaps_cols])
         return spreads_df
+
+
+    def get_usd_libor_swaps_historical_term_structures(
+        self,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        max_concurrent_tasks: int = 64,
+        max_keepalive_connections: int = 5,
+        ohlc: Optional[Literal["open", "high", "low", "close"]] = None,
+        tenors: Optional[List[str]] = None,
+        liquid_tenors: Optional[bool] = False,
+        interp_extrap_strat: Optional[Callable] = None,
+    ): 
+        pass
+
