@@ -51,6 +51,7 @@ setuptools.setup(
     python_requires=">=3.8",
     install_requires=INSTALL_REQUIRES,
     packages=["Curvy-CUSIPs"],
+    package_dir={"":"Curvy-CUSIPs"},
     long_description=Path("README.md").read_text(),
     long_description_content_type="text/markdown",
 )
