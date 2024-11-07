@@ -1,0 +1,8 @@
+LICENSE
+README.md
+setup.py
+src/Curvy_CUSIPs.egg-info/PKG-INFO
+src/Curvy_CUSIPs.egg-info/SOURCES.txt
+src/Curvy_CUSIPs.egg-info/dependency_links.txt
+src/Curvy_CUSIPs.egg-info/requires.txt
+src/Curvy_CUSIPs.egg-info/top_level.txt

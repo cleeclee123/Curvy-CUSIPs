@@ -2,9 +2,9 @@ from pathlib import Path
 
 import setuptools
 
-VERSION = "0.1.0"  
+VERSION = "0.0.1"  
 
-NAME = "Curvy-CUSIPs" 
+NAME = "CurvyCUSIPs" 
 
 INSTALL_REQUIRES = [
     "aiohttp>=3.10.10",
@@ -38,14 +38,14 @@ setuptools.setup(
     },
     author="Nonquantitative Quant",
     author_email="yieldcurvemonkey@gmail.com",
-    license="Apache License 2.0",
+    license="MIT",
     classifiers=[
         "Development Status :: 3 - Alpha",
         "Environment :: Console",
         "Environment :: Web Environment",
         "Intended Audience :: Developers",
         "Intended Audience :: Science/Research",
-        "License :: OSI Approved :: MIT",
+        "License :: OSI Approved :: MIT License",
         "Programming Language :: Python :: 3.10",
     ],
     python_requires=">=3.10",
