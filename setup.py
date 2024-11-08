@@ -2,7 +2,7 @@ from pathlib import Path
 
 import setuptools
 
-VERSION = "0.0.5"  
+VERSION = "0.0.6"  
 
 NAME = "CurvyCUSIPs" 
 
