@@ -2,11 +2,10 @@ import asyncio
 import math
 import os
 import shutil
-import ujson as json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from itertools import product
-from typing import Dict, List, Literal, Optional, TypeAlias, Tuple
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Dict, List, Literal, Optional, Tuple, TypeAlias
 
 import aiohttp
 import matplotlib.pyplot as plt
@@ -14,6 +13,7 @@ import numpy as np
 import pandas as pd
 import QuantLib as ql
 import requests
+import ujson as json
 from scipy.optimize import minimize
 
 JSON: TypeAlias = dict[str, "JSON"] | list["JSON"] | str | int | float | bool | None
@@ -521,6 +521,7 @@ def to_quantlib_fixed_rate_bond_obj(bond_info: Dict[str, str], as_of_date: datet
         [bond_info["int_rate"] / 100],
         ql.ActualActual(ql.ActualActual.ISDA),
     )
+
 
 class NoneReturningSpline:
     def __init__(self, *args, **kwargs):

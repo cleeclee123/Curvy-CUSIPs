@@ -1,17 +1,17 @@
 import asyncio
+import re
 import warnings
 from datetime import datetime
-from typing import Dict, List, Literal, Optional, Tuple, Callable
+from typing import Callable, Dict, List, Literal, Optional, Tuple
 
 import httpx
 import numpy as np
 import pandas as pd
 import requests
-import re
 import scipy
 import scipy.interpolate
 
-from DataFetcher.base import DataFetcherBase
+from CurvyCUSIPs.DataFetcher.base import DataFetcherBase
 
 warnings.filterwarnings("ignore", category=pd.errors.SettingWithCopyWarning)
 warnings.simplefilter(action="ignore", category=FutureWarning)
@@ -275,7 +275,7 @@ class BBGSEF_DataFetcher(DataFetcherBase):
         big_df: pd.DataFrame = pd.concat(results)[["tradeDate", "security", f"price{ohlc.title()}" if ohlc else "settlementPrice"]]
         big_df = big_df[big_df["security"].str.len() <= 22]
         big_df["tradeDate"] = pd.to_datetime(big_df["tradeDate"], errors="coerce").dt.tz_localize(None)
-        big_df.rename(columns={"tradeDate": "Date"}, inplace=True) 
+        big_df.rename(columns={"tradeDate": "Date"}, inplace=True)
         big_df = big_df.pivot(index="Date", columns="security", values="settlementPrice")
         big_df = big_df[sorted(big_df.columns, key=self._swap_tenor_sort)]
         big_df.reset_index(inplace=True)
@@ -292,8 +292,8 @@ class BBGSEF_DataFetcher(DataFetcherBase):
             date_col = big_df["Date"]
             big_df = self._interpolate_and_extrapolate_missing_rates(big_df[big_df.columns[1:]], interp_extrap_strat)
             big_df.insert(0, "Date", date_col)
-        
-        big_df.index.name = None 
+
+        big_df.index.name = None
         big_df.columns.name = None
 
         return big_df
@@ -324,7 +324,6 @@ class BBGSEF_DataFetcher(DataFetcherBase):
         spreads_df = pd.DataFrame(spreads_df, index=common_dates, columns=[f"{swp} Spread" for swp in swaps_cols])
         return spreads_df
 
-
     def get_usd_libor_swaps_historical_term_structures(
         self,
         start_date: Optional[datetime] = None,
@@ -335,6 +334,5 @@ class BBGSEF_DataFetcher(DataFetcherBase):
         tenors: Optional[List[str]] = None,
         liquid_tenors: Optional[bool] = False,
         interp_extrap_strat: Optional[Callable] = None,
-    ): 
+    ):
         pass
-

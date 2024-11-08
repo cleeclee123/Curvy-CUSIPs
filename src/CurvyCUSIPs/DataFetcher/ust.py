@@ -11,8 +11,8 @@ import numpy as np
 import pandas as pd
 import requests
 
-from DataFetcher.base import DataFetcherBase
-from utils.ust_utils import JSON, build_treasurydirect_header, get_active_cusips, historical_auction_cols, last_day_n_months_ago
+from CurvyCUSIPs.DataFetcher.base import DataFetcherBase
+from CurvyCUSIPs.utils.ust_utils import JSON, build_treasurydirect_header, get_active_cusips, historical_auction_cols, last_day_n_months_ago
 
 warnings.filterwarnings("ignore", category=pd.errors.SettingWithCopyWarning)
 warnings.simplefilter(action="ignore", category=FutureWarning)

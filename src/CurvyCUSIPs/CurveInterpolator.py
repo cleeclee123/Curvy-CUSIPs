@@ -15,15 +15,17 @@ interpolations:
 
 """
 
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import numpy.typing as npt
-from typing import Literal, Optional, Dict, Callable, List, Tuple
 import logging
-import scipy.interpolate
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from models.MonotoneConvex import MonotoneConvex
+from typing import Callable, Dict, List, Literal, Optional, Tuple
+
+import matplotlib.pyplot as plt
+import numpy as np
+import numpy.typing as npt
+import pandas as pd
+import scipy.interpolate
+
+from CurvyCUSIPs.models.MonotoneConvex import MonotoneConvex
 
 
 # TODO

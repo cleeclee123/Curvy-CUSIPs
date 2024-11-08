@@ -2,7 +2,7 @@ from pathlib import Path
 
 import setuptools
 
-VERSION = "0.0.2"  
+VERSION = "0.0.5"  
 
 NAME = "CurvyCUSIPs" 
 
@@ -51,7 +51,7 @@ setuptools.setup(
     python_requires=">=3.10",
     install_requires=INSTALL_REQUIRES,
     package_dir={"": "src"},
-    packages=setuptools.find_packages(where="src"),
+    packages=setuptools.find_packages(where="src/"),
     long_description=Path("README.md").read_text(),
     long_description_content_type="text/markdown",
 )

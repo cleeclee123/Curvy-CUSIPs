@@ -7,7 +7,7 @@ from typing import Dict, List, Optional
 
 import httpx
 
-from DataFetcher.base import DataFetcherBase
+from CurvyCUSIPs.DataFetcher.base import DataFetcherBase
 
 if sys.version_info[0] >= 3:
     import urllib.error as url_error

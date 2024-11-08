@@ -7,9 +7,8 @@ import httpx
 import pandas as pd
 import requests
 
-from DataFetcher.base import DataFetcherBase
-
-from utils.ust_utils import build_treasurydirect_header
+from CurvyCUSIPs.DataFetcher.base import DataFetcherBase
+from CurvyCUSIPs.utils.ust_utils import build_treasurydirect_header
 
 warnings.filterwarnings("ignore", category=pd.errors.SettingWithCopyWarning)
 warnings.simplefilter(action="ignore", category=FutureWarning)

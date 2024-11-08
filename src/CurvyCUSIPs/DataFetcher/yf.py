@@ -7,7 +7,7 @@ from typing import Dict, List, Literal, Optional, Tuple
 import httpx
 import pandas as pd
 
-from DataFetcher.base import DataFetcherBase
+from CurvyCUSIPs.DataFetcher.base import DataFetcherBase
 
 warnings.filterwarnings("ignore", category=pd.errors.SettingWithCopyWarning)
 warnings.simplefilter(action="ignore", category=FutureWarning)

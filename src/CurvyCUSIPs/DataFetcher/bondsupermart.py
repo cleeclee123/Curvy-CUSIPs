@@ -7,9 +7,8 @@ from typing import Dict, List, Optional, Tuple
 import httpx
 import pandas as pd
 
-from DataFetcher.base import DataFetcherBase
-
-from utils.ust_utils import get_isin_from_cusip
+from CurvyCUSIPs.DataFetcher.base import DataFetcherBase
+from CurvyCUSIPs.utils.ust_utils import get_isin_from_cusip
 
 warnings.filterwarnings("ignore", category=pd.errors.SettingWithCopyWarning)
 warnings.simplefilter(action="ignore", category=FutureWarning)
@@ -80,91 +79,58 @@ class BondSupermartDataFetcher(DataFetcherBase):
                     response.raise_for_status()
                     response_json = response.json()
 
-                    if (
-                        not response_json["yieldChartMap"]
-                        or not response_json["priceChartMap"]
-                    ):
+                    if not response_json["yieldChartMap"] or not response_json["priceChartMap"]:
                         raise ValueError("Data is None")
 
                     bid_yield_df = pd.DataFrame(
                         [
                             {"Date": ts_yield_list[0], "bid_yield": ts_yield_list[1]}
-                            for ts_yield_list in response_json["yieldChartMap"][
-                                "SINCE_INCEPTION"
-                            ][0]["data"]
+                            for ts_yield_list in response_json["yieldChartMap"]["SINCE_INCEPTION"][0]["data"]
                         ]
                     )
                     ask_yield_df = pd.DataFrame(
                         [
                             {"Date": ts_yield_list[0], "ask_yield": ts_yield_list[1]}
-                            for ts_yield_list in response_json["yieldChartMap"][
-                                "SINCE_INCEPTION"
-                            ][1]["data"]
+                            for ts_yield_list in response_json["yieldChartMap"]["SINCE_INCEPTION"][1]["data"]
                         ]
                     )
                     bid_price_df = pd.DataFrame(
                         [
                             {"Date": ts_price_list[0], "bid_price": ts_price_list[1]}
-                            for ts_price_list in response_json["priceChartMap"][
-                                "SINCE_INCEPTION"
-                            ][0]["data"]
+                            for ts_price_list in response_json["priceChartMap"]["SINCE_INCEPTION"][0]["data"]
                         ]
                     )
                     ask_price_df = pd.DataFrame(
                         [
                             {"Date": ts_price_list[0], "ask_price": ts_price_list[1]}
-                            for ts_price_list in response_json["priceChartMap"][
-                                "SINCE_INCEPTION"
-                            ][1]["data"]
+                            for ts_price_list in response_json["priceChartMap"]["SINCE_INCEPTION"][1]["data"]
                         ]
                     )
 
                     merged_df = reduce(
-                        lambda left, right: pd.merge(
-                            left, right, on="Date", how="outer"
-                        ),
+                        lambda left, right: pd.merge(left, right, on="Date", how="outer"),
                         [bid_price_df, bid_yield_df, ask_price_df, ask_yield_df],
                     )
-                    merged_df["Date"] = pd.to_datetime(
-                        merged_df["Date"], unit="ms", errors="coerce"
-                    )
-                    merged_df["bid_yield"] = pd.to_numeric(
-                        merged_df["bid_yield"], errors="coerce"
-                    )
-                    merged_df["ask_yield"] = pd.to_numeric(
-                        merged_df["ask_yield"], errors="coerce"
-                    )
-                    merged_df["mid_yield"] = (
-                        merged_df["bid_yield"] + merged_df["ask_yield"]
-                    ) / 2
+                    merged_df["Date"] = pd.to_datetime(merged_df["Date"], unit="ms", errors="coerce")
+                    merged_df["bid_yield"] = pd.to_numeric(merged_df["bid_yield"], errors="coerce")
+                    merged_df["ask_yield"] = pd.to_numeric(merged_df["ask_yield"], errors="coerce")
+                    merged_df["mid_yield"] = (merged_df["bid_yield"] + merged_df["ask_yield"]) / 2
 
-                    merged_df["bid_price"] = pd.to_numeric(
-                        merged_df["bid_price"], errors="coerce"
-                    )
-                    merged_df["ask_price"] = pd.to_numeric(
-                        merged_df["ask_price"], errors="coerce"
-                    )
-                    merged_df["mid_price"] = (
-                        merged_df["bid_price"] + merged_df["ask_price"]
-                    ) / 2
+                    merged_df["bid_price"] = pd.to_numeric(merged_df["bid_price"], errors="coerce")
+                    merged_df["ask_price"] = pd.to_numeric(merged_df["ask_price"], errors="coerce")
+                    merged_df["mid_price"] = (merged_df["bid_price"] + merged_df["ask_price"]) / 2
 
                     if start_date:
-                        merged_df = merged_df[
-                            merged_df["Date"].dt.date >= start_date.date()
-                        ]
+                        merged_df = merged_df[merged_df["Date"].dt.date >= start_date.date()]
                     if end_date:
-                        merged_df = merged_df[
-                            merged_df["Date"].dt.date <= end_date.date()
-                        ]
+                        merged_df = merged_df[merged_df["Date"].dt.date <= end_date.date()]
 
                     if uid:
                         return cusip, merged_df, uid
                     return cusip, merged_df
 
                 except httpx.HTTPStatusError as e:
-                    self._logger.error(
-                        f"Bondsupermart.com - Bad Status: {response.status_code}"
-                    )
+                    self._logger.error(f"Bondsupermart.com - Bad Status: {response.status_code}")
                     if response.status_code == 404:
                         if uid:
                             return cusip, pd.DataFrame(columns=cols_to_return), uid
@@ -172,18 +138,14 @@ class BondSupermartDataFetcher(DataFetcherBase):
 
                     retries += 1
                     wait_time = backoff_factor * (2 ** (retries - 1))
-                    self._logger.debug(
-                        f"UST Timeseries GitHub - Throttled for {cusip}. Waiting for {wait_time} seconds before retrying..."
-                    )
+                    self._logger.debug(f"UST Timeseries GitHub - Throttled for {cusip}. Waiting for {wait_time} seconds before retrying...")
                     await asyncio.sleep(wait_time)
 
                 except Exception as e:
                     self._logger.error(f"Bondsupermart.com - Error: {str(e)}")
                     retries += 1
                     wait_time = backoff_factor * (2 ** (retries - 1))
-                    self._logger.debug(
-                        f"Bondsupermart.com - Throttled for {cusip}. Waiting for {wait_time} seconds before retrying..."
-                    )
+                    self._logger.debug(f"Bondsupermart.com - Throttled for {cusip}. Waiting for {wait_time} seconds before retrying...")
                     await asyncio.sleep(wait_time)
 
             raise ValueError(f"Bondsupermart  - Max retries exceeded for {cusip}")
@@ -194,9 +156,7 @@ class BondSupermartDataFetcher(DataFetcherBase):
                 return cusip, pd.DataFrame(columns=cols_to_return), uid
             return cusip, pd.DataFrame(columns=cols_to_return)
 
-    async def _fetch_cusip_timeseries_bondsupermart_with_semaphore(
-        self, semaphore, *args, **kwargs
-    ):
+    async def _fetch_cusip_timeseries_bondsupermart_with_semaphore(self, semaphore, *args, **kwargs):
         async with semaphore:
             return await self._fetch_cusip_timeseries_bondsupermart(*args, **kwargs)
 

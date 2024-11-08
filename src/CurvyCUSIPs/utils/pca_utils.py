@@ -1,30 +1,29 @@
 from __future__ import division, print_function
 
 from datetime import datetime, timedelta
-from typing import List, Optional, Annotated, Literal, Dict, Tuple
+from typing import Annotated, Dict, List, Literal, Optional, Tuple
 
 import matplotlib.pyplot as plt
-import plotly.graph_objs as go
-from plotly.subplots import make_subplots
-from sklearn.cluster import KMeans
-from scipy.spatial import ConvexHull
 import numpy as np
 import pandas as pd
+import plotly.graph_objs as go
 import seaborn as sns
+from plotly.subplots import make_subplots
+from scipy.spatial import ConvexHull
+from sklearn.cluster import KMeans
 
 sns.set_style("whitegrid")
 
+import matplotlib.colors as mcolors
 from scipy import signal as sig
 from scipy.interpolate import CubicSpline
 from scipy.optimize import fmin
-from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_squared_error
+from sklearn.preprocessing import StandardScaler
 
-import matplotlib.colors as mcolors
-
-from utils.ust_utils import enhanced_plotly_blue_scale
+from CurvyCUSIPs.utils.ust_utils import enhanced_plotly_blue_scale
 
 
 # TODO

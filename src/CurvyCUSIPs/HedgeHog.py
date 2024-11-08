@@ -7,15 +7,15 @@ import numpy.typing as npt
 import pandas as pd
 import scipy
 import statsmodels.api as sm
-from sklearn.linear_model import LinearRegression
 import ujson as json
 from scipy.optimize import minimize
+from sklearn.linear_model import LinearRegression
 from termcolor import colored
 
-from CurveBuilder import calc_ust_impl_spot_n_fwd_curve, calc_ust_metrics
-from CurveDataFetcher import CurveDataFetcher
-from utils.regression_utils import run_odr
-from utils.arbitragelab import JohansenPortfolio, construct_spread, EngleGrangerPortfolio
+from CurvyCUSIPs.CurveBuilder import calc_ust_impl_spot_n_fwd_curve, calc_ust_metrics
+from CurvyCUSIPs.CurveDataFetcher import CurveDataFetcher
+from CurvyCUSIPs.utils.arbitragelab import EngleGrangerPortfolio, JohansenPortfolio, construct_spread
+from CurvyCUSIPs.utils.regression_utils import run_odr
 
 
 def dv01_neutral_curve_hegde_ratio(

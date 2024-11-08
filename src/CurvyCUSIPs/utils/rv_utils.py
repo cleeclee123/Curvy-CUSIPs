@@ -20,11 +20,11 @@ pylab.rcParams.update(params)
 
 import seaborn as sns
 
-from CurveDataFetcher import CurveDataFetcher
-from CurveInterpolator import GeneralCurveInterpolator
-from CurveBuilder import calc_ust_metrics
-from utils.ust_viz import plot_usts
-from utils.regression_utils import run_basic_linear_regression, run_basic_linear_regression_df, plot_residuals_timeseries, run_rolling_regression_df
+from CurvyCUSIPs.CurveDataFetcher import CurveDataFetcher
+from CurvyCUSIPs.CurveInterpolator import GeneralCurveInterpolator
+from CurvyCUSIPs.CurveBuilder import calc_ust_metrics
+from CurvyCUSIPs.utils.ust_viz import plot_usts
+from CurvyCUSIPs.utils.regression_utils import run_basic_linear_regression, run_basic_linear_regression_df, plot_residuals_timeseries, run_rolling_regression_df
 
 sns.set(style="whitegrid", palette="dark")
 

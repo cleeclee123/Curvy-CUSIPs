@@ -9,7 +9,7 @@ import pandas as pd
 import ujson as json
 from requests.models import PreparedRequest
 
-from DataFetcher.base import DataFetcherBase
+from CurvyCUSIPs.DataFetcher.base import DataFetcherBase
 
 warnings.simplefilter(action="ignore", category=FutureWarning)
 

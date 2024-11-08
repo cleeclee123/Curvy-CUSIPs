@@ -4,16 +4,15 @@ import time
 import warnings
 from collections import defaultdict
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple, Literal
+from typing import Dict, List, Literal, Optional, Tuple
 
 import aiohttp
 import pandas as pd
 import requests
 import ujson as json
 
-from DataFetcher.base import DataFetcherBase
-
-from utils.ust_utils import cookie_string_to_dict
+from CurvyCUSIPs.DataFetcher.base import DataFetcherBase
+from CurvyCUSIPs.utils.ust_utils import cookie_string_to_dict
 
 warnings.filterwarnings("ignore", category=pd.errors.SettingWithCopyWarning)
 warnings.simplefilter(action="ignore", category=FutureWarning)
