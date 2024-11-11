@@ -143,3 +143,9 @@ __pycache__
 build
 
 CurvyCUSIPs.egg-info
+
+\temp
+temp/
+
+curvycusipsdev/
+\curvycusipsdev

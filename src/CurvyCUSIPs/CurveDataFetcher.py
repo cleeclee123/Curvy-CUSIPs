@@ -26,6 +26,7 @@ from CurvyCUSIPs.DataFetcher.ust import USTreasuryDataFetcher
 from CurvyCUSIPs.DataFetcher.wsj import WSJDataFetcher
 from CurvyCUSIPs.DataFetcher.yf import YahooFinanceDataFetcher
 from CurvyCUSIPs.DataFetcher.bbg_sef import BBGSEF_DataFetcher
+from CurvyCUSIPs.DataFetcher.dtcc import DTCCSDR_DataFetcher
 from CurvyCUSIPs.utils.QL_BondPricer import QL_BondPricer
 from CurvyCUSIPs.utils.RL_BondPricer import RL_BondPricer
 from CurvyCUSIPs.utils.ust_utils import get_active_cusips, get_last_n_off_the_run_cusips, is_valid_ust_cusip, ust_sorter, NoneReturningSpline
@@ -105,6 +106,8 @@ class CurveDataFetcher:
     bondsupermart_fetcher: BondSupermartDataFetcher = None
     wsj_data_fetcher: WSJDataFetcher = None
     yf_data_fetcher: YahooFinanceDataFetcher = None
+    bbg_sef_fetcher: BBGSEF_DataFetcher = None
+    dtcc_sdr_fetcher: DTCCSDR_DataFetcher = None
 
     def __init__(
         self,
@@ -196,7 +199,15 @@ class CurveDataFetcher:
             debug_verbose=debug_verbose,
             info_verbose=info_verbose,
             error_verbose=error_verbose,
-        ) 
+        )
+
+        self.dtcc_sdr_fetcher = DTCCSDR_DataFetcher(
+            global_timeout=global_timeout,
+            proxies=proxies,
+            debug_verbose=debug_verbose,
+            info_verbose=info_verbose,
+            error_verbose=error_verbose,
+        )
 
     @staticmethod
     def par_bond_equation(c, maturity, zero_curve_func):
