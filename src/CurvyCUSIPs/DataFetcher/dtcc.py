@@ -4,22 +4,24 @@ import warnings
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from functools import reduce, partial
+from functools import reduce
 from io import BytesIO
-from typing import Callable, Dict, List, Literal, Optional, Tuple, Union
+from typing import Dict, List, Literal, Optional, Tuple, Union
 
-import warnings
 import httpx
+import numpy as np
 import pandas as pd
-import scipy
+import QuantLib as ql
 import scipy.interpolate
 import tqdm
 import tqdm.asyncio
+from pandas.errors import DtypeWarning
 from pandas.tseries.holiday import USFederalHolidayCalendar
 from pandas.tseries.offsets import CustomBusinessDay
-from pandas.errors import DtypeWarning
+from termcolor import colored
 
 from CurvyCUSIPs.DataFetcher.base import DataFetcherBase
+from CurvyCUSIPs.utils.dtcc_swaps_utils import build_ql_piecewise_curves, format_swap_ohlc, format_swap_time_and_sales
 
 warnings.filterwarnings("ignore", category=pd.errors.SettingWithCopyWarning)
 warnings.simplefilter(action="ignore", category=FutureWarning)
@@ -46,6 +48,11 @@ class DTCCSDR_DataFetcher(DataFetcherBase):
             debug_verbose=debug_verbose,
             info_verbose=info_verbose,
             error_verbose=error_verbose,
+        )
+
+        # TODO make general plz
+        self.anna_dsb_swaps_lookup_table_df = pd.read_excel(
+            r"C:\Users\chris\Project Bond King\Curvy-CUSIPs\src\CurvyCUSIPs\data\anna_dsb\ff_swaps_loookup.xlsx"
         )
 
     def _get_dtcc_url_and_header(
@@ -118,7 +125,6 @@ class DTCCSDR_DataFetcher(DataFetcherBase):
 
                 except Exception as e:
                     self._logger.error(f"DTCC - Error for {agency}-{asset_class}-{date}: {e}")
-                    print(e)
                     retries += 1
                     wait_time = backoff_factor * (2 ** (retries - 1))
                     self._logger.debug(f"DTCC - Throttled. Waiting for {wait_time} seconds before retrying...")
@@ -129,7 +135,7 @@ class DTCCSDR_DataFetcher(DataFetcherBase):
         except Exception as e:
             self._logger.error(e)
             return None
-    
+
     def _read_file(self, file_data: Tuple[BytesIO, str, bool]) -> Tuple[Union[str, datetime], pd.DataFrame]:
         file_buffer, file_name, convert_key_into_dt = file_data
 
@@ -222,7 +228,7 @@ class DTCCSDR_DataFetcher(DataFetcherBase):
     ):
         async with semaphore:
             zip_buffer = await self._fetch_dtcc_sdr_data_helper(client, date, agency, asset_class)
-        
+
         if parallelize:
             loop = asyncio.get_event_loop()
             with ThreadPoolExecutor(max_workers=max_extraction_workers) as pool:
@@ -242,6 +248,7 @@ class DTCCSDR_DataFetcher(DataFetcherBase):
         max_keepalive_connections: Optional[int] = 5,
         parallelize: Optional[bool] = False,
         max_extraction_workers: Optional[int] = 3,
+        verbose=False,
     ) -> Dict[datetime, pd.DataFrame]:
 
         bdates = pd.date_range(start=start_date, end=end_date, freq=CustomBusinessDay(calendar=USFederalHolidayCalendar()))
@@ -302,5 +309,292 @@ class DTCCSDR_DataFetcher(DataFetcherBase):
                     dates=bdates, agency=agency, asset_class=asset_class, parallelize=parallelize, max_extraction_workers=max_extraction_workers
                 )
             )
+            if results is None or len(results) == 0:
+                print('"fetch_dtcc_sdr_data_timeseries" --- empty results') if verbose else None
+                return {}
+
             return reduce(lambda a, b: a | b, results)
 
+    # examples/references:
+    # https://www.isda.org/a/z3UgE/2006-FRO-Mapping-to-2021-FROs-Version-3.pdf
+    # https://www.rbccm.com/assets/rbccm/docs/legal/doddfrank/Documents/ISDALibrary/2006%20ISDA%20Definitions.pdf
+    # https://www.clarusft.com/sofr-swap-nuances/
+    # https://www.isda.org/a/xjPgE/Market-Practice-Note-Effective-Date-for-SOFR-transactions-040822.pdf
+    # https://www.newyorkfed.org/medialibrary/Microsites/arrc/files/2021/users-guide-to-sofr2021-update.pdf
+
+    def fetch_historical_swaps_term_structure(
+        self,
+        start_date: datetime,
+        end_date: datetime,
+        swap_type: Literal["Fixed_Float", "Fixed_Float_OIS", "Fixed_Float_Zero_Coupon"],
+        # not an exhaustive list - most common
+        reference_floating_rates: List[
+            Literal["USD-SOFR-OIS Compound", "USD-SOFR-COMPOUND", "USD-SOFR", "USD-SOFR Compounded Index", "USD-SOFR CME Term"]
+        ],
+        # not an exhaustive list - most common
+        ccy: Literal["USD", "EUR", "JPY", "GBP"],
+        reference_floating_rate_term_value: int,
+        reference_floating_rate_term_unit: Literal["DAYS", "WEEK", "MNTH", "YEAR"],
+        notional_schedule: Literal["Constant", "Accreting", "Amortizing", "Custom"],
+        delivery_types: List[Literal["PHYS", "CASH"]],
+        settlement_t_plus: int,
+        payment_lag: int,
+        fixed_leg_frequency,
+        fixed_leg_daycount,
+        fixed_leg_convention,
+        fixed_leg_calendar,
+        ql_index,
+        ny_hours_only: Optional[bool] = False,
+        is_ois: Optional[bool] = False,
+        tenor_col: Optional[str] = "Tenor",
+        fixed_rate_col: Optional[str] = "Close",
+        logLinearDiscount: Optional[bool] = False,
+        logCubicDiscount: Optional[bool] = False,
+        linearZero: Optional[bool] = False,
+        cubicZero: Optional[bool] = False,
+        linearForward: Optional[bool] = False,
+        splineCubicDiscount: Optional[bool] = False,
+        max_concurrent_tasks: Optional[int] = 64,
+        max_keepalive_connections: Optional[int] = 5,
+        max_extraction_workers: Optional[int] = 3,
+        filter_extreme_time_and_sales: Optional[bool] = False,
+        minimum_num_trades_per_tenor: Optional[int] = 0,
+        minimum_num_trades_time_and_sales: Optional[int] = 100,
+        verbose: Optional[bool] = False,
+    ) -> (
+        Dict[
+            datetime,
+            Dict[
+                str,
+                pd.DataFrame
+                | Dict[
+                    str,
+                    ql.PiecewiseLogLinearDiscount
+                    | ql.PiecewiseLogCubicDiscount
+                    | ql.PiecewiseLinearZero
+                    | ql.PiecewiseCubicZero
+                    | ql.PiecewiseLinearForward
+                    | ql.PiecewiseSplineCubicDiscount,
+                ],
+            ],
+        ]
+        | Dict[datetime, pd.DataFrame]
+    ):
+        if "OIS" in swap_type or "OIS" in reference_floating_rates:
+            is_ois = True
+
+        build_ql_curves = True
+        if not (logLinearDiscount | logCubicDiscount | linearZero | cubicZero | linearForward | splineCubicDiscount):
+            build_ql_curves = False
+
+        sdr_time_and_sales_dict: Dict[datetime, pd.DataFrame] = self.fetch_dtcc_sdr_data_timeseries(
+            start_date=start_date,
+            end_date=end_date,
+            agency="CFTC",
+            asset_class="RATES",
+            max_concurrent_tasks=max_concurrent_tasks,
+            max_keepalive_connections=max_keepalive_connections,
+            max_extraction_workers=max_extraction_workers,
+        )
+
+        if sdr_time_and_sales_dict is None or len(sdr_time_and_sales_dict.keys()) == 0:
+            self._logger.debug('"fetch_historical_swaps_term_structure" --- SDR Time and Sales Data is Empty')
+            print('"fetch_historical_swaps_term_structure" --- SDR Time and Sales Data is Empty') if verbose else None
+            return {}
+
+        swaps_term_structures: Dict[
+            datetime,
+            Tuple[
+                pd.DataFrame,
+                Dict[
+                    str,
+                    ql.PiecewiseLogLinearDiscount
+                    | ql.PiecewiseLogCubicDiscount
+                    | ql.PiecewiseLinearZero
+                    | ql.PiecewiseCubicZero
+                    | ql.PiecewiseLinearForward
+                    | ql.PiecewiseSplineCubicDiscount,
+                ],
+            ],
+        ] = {}
+
+        UPI_MIGRATE_DATE = datetime(2024, 1, 29)
+        SCHEMA_CHANGE_2022 = datetime(2022, 11, 21)
+
+        upi_lookup_df = self.anna_dsb_swaps_lookup_table_df
+
+        UPIS = upi_lookup_df[
+            (upi_lookup_df["Header_UseCase"] == swap_type)
+            & (upi_lookup_df["Derived_UnderlierName"].isin(reference_floating_rates))
+            & ((upi_lookup_df["Attributes_NotionalCurrency"] == ccy))
+            & ((upi_lookup_df["Attributes_ReferenceRateTermValue"] == reference_floating_rate_term_value))
+            & ((upi_lookup_df["Attributes_ReferenceRateTermUnit"] == reference_floating_rate_term_unit))
+            & ((upi_lookup_df["Attributes_NotionalSchedule"] == notional_schedule))
+            & ((upi_lookup_df["Attributes_DeliveryType"].isin(delivery_types)))
+        ]["Identifier_UPI"].to_numpy()
+
+        legacy_swap_type_mapper = {
+            "Fixed_Float": "InterestRate:IRSwap:FixedFloat",
+            "Fixed_Float_OIS": "InterestRate:IRSwap:OIS",
+            "Fixed_Float_Zero_Coupon": "InterestRate:IRSwap:FixedFloat",
+        }
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+
+            for date, time_and_sales_sdr_df in tqdm.tqdm(sdr_time_and_sales_dict.items(), desc="BUILDING SOFR CURVES..."):
+                try:
+                    if time_and_sales_sdr_df is None or time_and_sales_sdr_df.empty:
+                        raise ValueError("swaps_time_and_sales_df is empty")
+
+                    if date < SCHEMA_CHANGE_2022:
+                        swaps_time_and_sales_df: pd.DataFrame = format_swap_time_and_sales(
+                            time_and_sales_sdr_df[
+                                (
+                                    (time_and_sales_sdr_df["Product ID"] == legacy_swap_type_mapper[swap_type])
+                                    & (
+                                        (time_and_sales_sdr_df["Leg 1 - Floating Rate Index"].isin(reference_floating_rates))
+                                        | (time_and_sales_sdr_df["Leg 2 - Floating Rate Index"].isin(reference_floating_rates))
+                                    )
+                                    & ((time_and_sales_sdr_df["Notional Currency 1"] == ccy) | (time_and_sales_sdr_df["Notional Currency 2"] == ccy))
+                                    # & (
+                                    #     (
+                                    #         time_and_sales_sdr_df["Floating Rate Reset Frequency Period 1"]
+                                    #         == f"{reference_floating_rate_term_value}{reference_floating_rate_term_unit[0]}"
+                                    #     )
+                                    #     | (
+                                    #         time_and_sales_sdr_df["Floating Rate Reset Frequency Period 2"]
+                                    #         == f"{reference_floating_rate_term_value}{reference_floating_rate_term_unit[0]}"
+                                    #     )
+                                    # )
+                                    & (time_and_sales_sdr_df["Action"] == "NEW")
+                                    & (time_and_sales_sdr_df["Transaction Type"] == "Trade")
+                                    & (
+                                        (time_and_sales_sdr_df["Non-Standardized Pricing Indicator"] == "N")
+                                        | (time_and_sales_sdr_df["Non-Standardized Pricing Indicator"].isna())
+                                    )
+                                )
+                            ],
+                            as_of_date=date,
+                            tenors_to_interpolate=["2M", "5M", "7M", "8M", "9M", "10M", "11M", "4Y", "6Y", "8Y"],
+                            minimum_num_trades=minimum_num_trades_per_tenor,
+                            verbose=verbose,
+                        )
+
+                    elif date < UPI_MIGRATE_DATE:
+                        swaps_time_and_sales_df: pd.DataFrame = format_swap_time_and_sales(
+                            time_and_sales_sdr_df[
+                                (
+                                    (time_and_sales_sdr_df["Product name"] == legacy_swap_type_mapper[swap_type])
+                                    & (
+                                        (time_and_sales_sdr_df["Underlier ID-Leg 1"].isin(reference_floating_rates))
+                                        | (time_and_sales_sdr_df["Underlier ID-Leg 2"].isin(reference_floating_rates))
+                                    )
+                                    & (
+                                        (time_and_sales_sdr_df["Notional currency-Leg 1"] == ccy)
+                                        | (time_and_sales_sdr_df["Notional currency-Leg 2"] == ccy)
+                                    )
+                                    & (time_and_sales_sdr_df["Action type"] == "NEWT")
+                                    & (time_and_sales_sdr_df["Package indicator"] == False)
+                                    & (
+                                        (time_and_sales_sdr_df["Non-standardized term indicator"] == False)
+                                        | time_and_sales_sdr_df["Non-standardized term indicator"].isna()
+                                    )
+                                )
+                            ],
+                            as_of_date=date,
+                            tenors_to_interpolate=["4Y", "6Y", "8Y"],
+                            minimum_num_trades=minimum_num_trades_per_tenor,
+                            verbose=verbose,
+                        )
+
+                    else:
+                        swaps_time_and_sales_df: pd.DataFrame = format_swap_time_and_sales(
+                            time_and_sales_sdr_df[
+                                (time_and_sales_sdr_df["Unique Product Identifier"].isin(UPIS))
+                                & (time_and_sales_sdr_df["Action type"] == "NEWT")
+                                & (time_and_sales_sdr_df["Package indicator"] == False)
+                                & (
+                                    (time_and_sales_sdr_df["Non-standardized term indicator"] == False)
+                                    | time_and_sales_sdr_df["Non-standardized term indicator"].isna()
+                                )
+                            ],
+                            as_of_date=date,
+                            tenors_to_interpolate=["4Y", "6Y", "8Y"],
+                            minimum_num_trades=minimum_num_trades_per_tenor,
+                            verbose=verbose
+                        )
+
+                    swaps_time_and_sales_df = swaps_time_and_sales_df.sort_values(by=["Execution Timestamp"])
+                    swaps_time_and_sales_df = swaps_time_and_sales_df.reset_index(drop=True)
+                    filtered_swaps_time_and_sales_df = swaps_time_and_sales_df.copy()
+
+                    if ny_hours_only:
+                        filtered_swaps_time_and_sales_df = filtered_swaps_time_and_sales_df[filtered_swaps_time_and_sales_df["Execution Timestamp"].dt.hour >= 12]
+                        filtered_swaps_time_and_sales_df = filtered_swaps_time_and_sales_df[filtered_swaps_time_and_sales_df["Execution Timestamp"].dt.hour <= 23]
+
+                    if filter_extreme_time_and_sales:
+                        filtered_swaps_time_and_sales_df = filtered_swaps_time_and_sales_df.groupby("Tenor", group_keys=False).apply(
+                            lambda group: group[
+                                (group["Fixed Rate"] > group["Fixed Rate"].quantile(0.25))
+                                & (group["Fixed Rate"] < group["Fixed Rate"].quantile(0.75))
+                            ]
+                        )
+
+                    if filtered_swaps_time_and_sales_df.empty or len(filtered_swaps_time_and_sales_df) < minimum_num_trades_time_and_sales:
+                        empty_err_message = f"Too little liquidity: {len(filtered_swaps_time_and_sales_df)} < {minimum_num_trades_time_and_sales}"
+
+                        if ny_hours_only:
+                            empty_err_message += " - ny_hours_only"
+                        if filter_extreme_time_and_sales:
+                            empty_err_message += " - filter_extreme_time_and_sales"
+                        raise ValueError(empty_err_message)
+
+                    def scipy_linear_interp_func(xx, yy, kind="linear"):
+                        return scipy.interpolate.interp1d(xx, yy, kind=kind, fill_value="extrapolate", bounds_error=False)
+
+                    swaps_ohlc_df = format_swap_ohlc(
+                        filtered_swaps_time_and_sales_df, as_of_date=date, dtcc_interp_func=scipy_linear_interp_func, ny_hours=ny_hours_only
+                    )
+                    swaps_term_structures[date] = {"ohlc": swaps_ohlc_df, "time_and_sales": swaps_time_and_sales_df}
+
+                    if build_ql_curves:
+                        try:
+                            ql_pw_curves = build_ql_piecewise_curves(
+                                df=swaps_ohlc_df,
+                                as_of_date=date,
+                                settlement_t_plus=settlement_t_plus,
+                                payment_lag=payment_lag,
+                                is_ois=is_ois,
+                                tenor_col=tenor_col,
+                                fixed_rate_col=fixed_rate_col,
+                                fixed_leg_frequency=fixed_leg_frequency,
+                                fixed_leg_daycount=fixed_leg_daycount,
+                                fixed_leg_convention=fixed_leg_convention,
+                                fixed_leg_calendar=fixed_leg_calendar,
+                                ql_index=ql_index,
+                                logLinearDiscount=logLinearDiscount,
+                                logCubicDiscount=logCubicDiscount,
+                                linearZero=linearZero,
+                                cubicZero=cubicZero,
+                                linearForward=linearForward,
+                                splineCubicDiscount=splineCubicDiscount,
+                            )
+
+                            swaps_term_structures[date]["ql_curves"] = ql_pw_curves
+                        except Exception as e:
+                            print(f'"fetch_historical_swaps_term_structure" --- Quantlib Error at {date} --- {str(e)}') if verbose else None
+                            swaps_term_structures[date]["ql_curves"] = {
+                                "logLinearDiscount": None,
+                                "logCubicDiscount": None,
+                                "linearZero": None,
+                                "cubicZero": None,
+                                "linearForward": None,
+                                "splineCubicDiscount": None,
+                            }
+
+                except Exception as e:
+                    print(f'"fetch_historical_swaps_term_structure" --- Curve Building Error at {date} --- {str(e)}') if verbose else None
+                    self._logger.error(f"DTCC Swaps Curve Building (fetch_historical_sofr_ois_term_structure) at {date} --- {e}")
+
+            return swaps_term_structures
