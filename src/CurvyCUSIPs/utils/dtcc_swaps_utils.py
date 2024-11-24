@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Callable, Dict, List, Optional, Tuple
-from pandas.tseries.offsets import BDay
+from pandas.tseries.offsets import BDay, BMonthEnd
 
 import numpy as np
 import pandas as pd
@@ -99,118 +99,6 @@ def parse_frequency(frequency):
         raise ValueError("Invalid period string format")
 
 
-def format_swap_time_and_sales(
-    df: pd.DataFrame, as_of_date: datetime, tenors_to_interpolate: Optional[List[str] | bool] = None, minimum_num_trades=0, verbose=False
-):
-    swap_columns = [
-        "Event timestamp",
-        "Execution Timestamp",
-        "Effective Date",
-        "Expiration Date",
-        "Platform identifier",
-        "Tenor",
-        "Fwd",
-        "Fixed Rate",
-        "Direction",
-        "Notional Amount",
-        "Unique Product Identifier",
-        "UPI FISN",
-        "UPI Underlier Name",
-    ]
-
-    UPI_MIGRATE_DATE = datetime(2024, 1, 29)
-    SCHEMA_CHANGE_2022 = datetime(2023, 1, 1)
-
-    if as_of_date < SCHEMA_CHANGE_2022:
-        df = df.rename(
-            columns={
-                "Event Timestamp": "Event timestamp",
-                "Leg 1 - Floating Rate Index": "Underlier ID-Leg 1",
-                "Fixed Rate 1": "Fixed rate-Leg 1",
-                "Fixed Rate 2": "Fixed rate-Leg 2",
-                "Notional Amount 1": "Notional amount-Leg 1",
-                "Notional Amount 2": "Notional amount-Leg 2",
-            }
-        )
-
-    if as_of_date < UPI_MIGRATE_DATE or as_of_date < SCHEMA_CHANGE_2022:
-        df["Unique Product Identifier"] = "DNE"
-        df["UPI FISN"] = "DNE"
-        df["UPI Underlier Name"] = df["Underlier ID-Leg 1"].combine_first(df["Underlier ID-Leg 2"])
-
-    date_columns = [
-        "Event timestamp",
-        "Execution Timestamp",
-        "Effective Date",
-        "Expiration Date",
-    ]
-    for col in date_columns:
-        df[col] = pd.to_datetime(df[col])
-        df[col] = df[col].dt.tz_localize(None)
-
-    df = df[df["Event timestamp"].dt.date >= as_of_date.date()]
-    df = df[df["Execution Timestamp"].dt.date >= as_of_date.date()]
-
-    year_day_count = 360
-    df["Expiry (d)"] = (df["Expiration Date"] - df["Effective Date"]).dt.days
-    df["Expiry (w)"] = df["Expiry (d)"] / 7
-    df["Expiry (m)"] = df["Expiry (d)"] / 30
-    df["Expiry (yr)"] = df["Expiry (d)"] / year_day_count
-
-    settle_date = as_of_date + BDay(2)
-    df["Fwd (d)"] = (df["Effective Date"] - settle_date).dt.days
-    df["Fwd (w)"] = df["Fwd (d)"] / 7
-    df["Fwd (m)"] = df["Fwd (d)"] / 30
-    df["Fwd (yr)"] = df["Fwd (d)"] / year_day_count
-
-    def format_tenor(row: pd.Series, col: str):
-        if row[f"{col} (d)"] < 7:
-            return f"{int(row[f'{col} (d)'])}D"
-        if row[f"{col} (w)"] <= 3.75:
-            return f"{int(row[f'{col} (w)'])}W"
-        if row[f"{col} (m)"] < 23.5:
-            return f"{int(row[f'{col} (m)'])}M"
-        return f"{int(row[f'{col} (yr)'])}Y"
-
-    df["Tenor"] = df.apply(lambda row: format_tenor(row, col="Expiry"), axis=1)
-    df["Fwd"] = df.apply(lambda row: format_tenor(row, col="Fwd"), axis=1)
-
-    df["Notional amount-Leg 1"] = pd.to_numeric(df["Notional amount-Leg 1"].str.replace(",", ""), errors="coerce")
-    df["Notional amount-Leg 2"] = pd.to_numeric(df["Notional amount-Leg 2"].str.replace(",", ""), errors="coerce")
-    df["Notional Amount"] = df["Notional amount-Leg 1"].combine_first(df["Notional amount-Leg 2"])
-    df["Fixed rate-Leg 1"] = pd.to_numeric(df["Fixed rate-Leg 1"], errors="coerce")
-    df["Fixed rate-Leg 2"] = pd.to_numeric(df["Fixed rate-Leg 2"], errors="coerce")
-    df["Fixed Rate"] = df["Fixed rate-Leg 1"].combine_first(df["Fixed rate-Leg 2"])
-    df["Direction"] = df.apply(
-        lambda row: "receive" if pd.notna(row["Fixed rate-Leg 1"]) else ("pay" if pd.notna(row["Fixed rate-Leg 2"]) else None), axis=1
-    )
-
-    # let ignore negative rates
-    df = df[df["Fixed Rate"] > 0]
-    df = df[(df["Notional Amount"] > 0) & (df["Notional Amount"].notna())]
-
-    df = df.drop(
-        columns=[
-            "Fixed rate-Leg 1",
-            "Fixed rate-Leg 2",
-            "Expiry (d)",
-            "Expiry (m)",
-            "Expiry (yr)",
-        ]
-    )
-
-    # stuff to interpolate instead of observing due to low liquidity
-    if tenors_to_interpolate is not None:
-        # for tenor in DEFAULT_SWAP_TENORS:
-        #     if len(df[(df["Tenor"] == tenor) & (df["Fwd"] == "0D")]) <= minimum_num_trades:
-        #         tenors_to_interpolate.append(tenor)
-
-        print("Tenors that will be Interpolated: ", tenors_to_interpolate) if verbose else None
-        df = df[~df["Tenor"].isin(set(tenors_to_interpolate))]
-
-    return df[swap_columns]
-
-
 def tenor_to_years(tenor):
     num = float(tenor[:-1])
     unit = tenor[-1].upper()
@@ -224,80 +112,6 @@ def tenor_to_years(tenor):
         return num
     else:
         raise ValueError(f"Unknown tenor unit: {tenor}")
-
-
-def default_interp_func(x, y):
-    return scipy.interpolate.interp1d(x, y, kind="linear", fill_value="extrapolate", bounds_error=False)
-
-
-def format_swap_ohlc(
-    df: pd.DataFrame,
-    as_of_date: datetime,
-    dtcc_interp_func: Optional[Callable] = default_interp_func,
-    default_tenors=DEFAULT_SWAP_TENORS,
-    t_plus_another_one=False,
-    ny_hours=False,
-):
-    filtered_df = df[(df["Fwd"] == "0D")]
-    
-    if len(filtered_df) < 100:
-        t_plus_another_one = True
-    
-    if filtered_df.empty or t_plus_another_one:
-        filtered_df = df[
-            (df["Fwd"] == "0D")
-            | (df["Fwd"] == "1D")
-            # | (df["Fwd"] == "2D")
-            # | (df["Fwd"] == "-2D")
-            # | (df["Fwd"] == "3D")
-            # | (df["Fwd"] == "-3D")
-            # | (df["Fwd"] == "4D")
-            # | (df["Fwd"] == "-4D")
-        ]
-
-    filtered_df = filtered_df.sort_values(by=["Tenor", "Execution Timestamp", "Fixed Rate"])
-    filtered_df = filtered_df.sort_values(by=["Execution Timestamp"], ascending=True)
-
-    if ny_hours:
-        filtered_df = filtered_df[filtered_df["Execution Timestamp"].dt.hour >= 12]
-        filtered_df = filtered_df[filtered_df["Execution Timestamp"].dt.hour <= 23]
-
-    tenor_df = (
-        filtered_df.groupby("Tenor")
-        .agg(
-            Open=("Fixed Rate", "first"),
-            High=("Fixed Rate", "max"),
-            Low=("Fixed Rate", "min"),
-            Close=("Fixed Rate", "last"),
-            VWAP=(
-                "Fixed Rate",
-                lambda x: (x * filtered_df.loc[x.index, "Notional Amount"]).sum() / filtered_df.loc[x.index, "Notional Amount"].sum(),
-            ),
-        )
-        .reset_index()
-    )
-
-    tenor_df["Tenor"] = pd.Categorical(tenor_df["Tenor"], categories=sorted(tenor_df["Tenor"], key=lambda x: (x[-1], int(x[:-1]))))
-    tenor_df["Expiry"] = [rl.add_tenor(as_of_date + offsets.BDay(2), _, "F", "nyc") for _ in tenor_df["Tenor"]]
-    tenor_df = tenor_df.sort_values("Expiry").reset_index(drop=True)
-    tenor_df = tenor_df[["Tenor", "Open", "High", "Low", "Close", "VWAP"]]
-    tenor_df = tenor_df[tenor_df["Tenor"].isin(default_tenors)].reset_index(drop=True)
-
-    if dtcc_interp_func is not None:
-        x = np.array([tenor_to_years(t) for t in tenor_df["Tenor"]])
-        x_new = np.array([tenor_to_years(t) for t in default_tenors])
-        interp_df = pd.DataFrame({"Tenor": default_tenors})
-        for col in ["Open", "High", "Low", "Close", "VWAP"]:
-            y = tenor_df[col].values
-            y_new = dtcc_interp_func(x, y)(x_new)
-            interp_df[col] = y_new
-
-        interp_df.insert(1, "Expiry", [rl.add_tenor(as_of_date + offsets.BDay(2), _, "F", "nyc") for _ in interp_df["Tenor"]])
-        interp_df = interp_df.sort_values("Expiry").reset_index(drop=True)
-
-        return interp_df
-
-    return tenor_df
 
 
 def get_sofr_ois(
@@ -357,7 +171,14 @@ def build_ql_piecewise_curves(
     if not isinstance(as_of_date, ql.Date):
         evaluation_date = datetime_to_ql_date(as_of_date)
 
-    ql.Settings.instance().evaluationDate = evaluation_date
+    try:
+        ql.Settings.instance().evaluationDate = evaluation_date
+    except Exception as e:
+        if "degenerate" in str(e):
+            plus_one_bday_as_of_date = as_of_date + BDay(1)
+            ql.Settings.instance().evaluationDate = datetime_to_ql_date(plus_one_bday_as_of_date)
+        else:
+            raise e
 
     # settlementDays,
     # Period tenor,
@@ -386,44 +207,97 @@ def build_ql_piecewise_curves(
     # https://quant.stackexchange.com/questions/64342/rfr-boostrapping-using-rfr-ois-is-convexity-adjustment-technically-necessary?rq=1
     # https://quant.stackexchange.com/questions/74766/bootstrapping-sofr-curve-and-swap-payment-lag
     # https://www.jpmorgan.com/content/dam/jpm/global/disclosures/IN/usd-inr-irs.pdf
+    # https://www.tradeweb.com/49b49f/globalassets/our-businesses/market-regulation/sef-2023/tw---mat-submission.5.22.23.pdf
 
     # can just ignore payment pay b/c convexity adjustment is negligible for bootstrapping purposes
     # cubic/spline methods are relatively ill conditioned to the piecewie linear methods -
 
     if is_ois:
-        helpers = [
-            ql.OISRateHelper(
-                settlement_t_plus,
-                tenor_to_ql_period(row[tenor_col]),
-                ql.QuoteHandle(ql.SimpleQuote(row[fixed_rate_col])),
-                ql_index,
-                paymentConvention=fixed_leg_convention,
-                paymentCalendar=fixed_leg_calendar,
-                paymentFrequency=fixed_leg_frequency if tenor_to_ql_period(row[tenor_col]) > ql.Period("18M") else ql.Once,
-                pillar=ql.Pillar.MaturityDate,
-                telescopicValueDates=False,
-                endOfMonth=False,
-            )
-            for _, row in df.iterrows()
-        ]
+        settlement_date = as_of_date + BDay(2)
+        is_end_of_bmonth = BMonthEnd().rollforward(settlement_date) == settlement_date
 
-        # https://github.com/lballabio/QuantLib/issues/700
-        with_payment_lag_helpers = [
-            ql.OISRateHelper(
-                settlement_t_plus,
-                tenor_to_ql_period(row[tenor_col]),
-                ql.QuoteHandle(ql.SimpleQuote(row[fixed_rate_col])),
-                ql_index,
-                paymentLag=payment_lag,
-                paymentConvention=fixed_leg_convention,
-                paymentCalendar=fixed_leg_calendar,
-                paymentFrequency=fixed_leg_frequency if tenor_to_ql_period(row[tenor_col]) > ql.Period("18M") else ql.Once,
-                pillar=ql.Pillar.MaturityDate,
-                telescopicValueDates=False,
-                endOfMonth=False,
-            )
-            for _, row in df.iterrows()
-        ]
+        try:
+            helpers = [
+                ql.OISRateHelper(
+                    settlement_t_plus,
+                    tenor_to_ql_period(row[tenor_col]),
+                    ql.QuoteHandle(ql.SimpleQuote(row[fixed_rate_col])),
+                    ql_index,
+                    paymentConvention=fixed_leg_convention,
+                    paymentCalendar=fixed_leg_calendar,
+                    paymentFrequency=fixed_leg_frequency if tenor_to_ql_period(row[tenor_col]) > ql.Period("18M") else ql.Once,
+                    pillar=ql.Pillar.MaturityDate,
+                    telescopicValueDates=False,
+                    endOfMonth=is_end_of_bmonth,
+                )
+                for _, row in df.iterrows()
+            ]
+        except Exception as e:
+            # https://github.com/lballabio/QuantLib/issues/1405
+            if "degenerate" in str(e):
+                plus_one_bday_as_of_date = as_of_date + BDay(1)
+                ql.Settings.instance().evaluationDate = datetime_to_ql_date(plus_one_bday_as_of_date)
+                helpers = [
+                    ql.OISRateHelper(
+                        settlement_t_plus,
+                        tenor_to_ql_period(row[tenor_col]),
+                        ql.QuoteHandle(ql.SimpleQuote(row[fixed_rate_col])),
+                        ql_index,
+                        paymentConvention=fixed_leg_convention,
+                        paymentCalendar=fixed_leg_calendar,
+                        paymentFrequency=fixed_leg_frequency if tenor_to_ql_period(row[tenor_col]) > ql.Period("18M") else ql.Once,
+                        pillar=ql.Pillar.MaturityDate,
+                        telescopicValueDates=False,
+                        endOfMonth=is_end_of_bmonth,
+                    )
+                    for _, row in df.iterrows()
+                ]
+            else:
+                raise e
+
+        try:
+            # https://github.com/lballabio/QuantLib/issues/700
+            with_payment_lag_helpers = [
+                ql.OISRateHelper(
+                    settlement_t_plus,
+                    tenor_to_ql_period(row[tenor_col]),
+                    ql.QuoteHandle(ql.SimpleQuote(row[fixed_rate_col])),
+                    ql_index,
+                    paymentLag=payment_lag,
+                    paymentConvention=fixed_leg_convention,
+                    paymentCalendar=fixed_leg_calendar,
+                    paymentFrequency=fixed_leg_frequency if tenor_to_ql_period(row[tenor_col]) > ql.Period("18M") else ql.Once,
+                    pillar=ql.Pillar.MaturityDate,
+                    telescopicValueDates=False,
+                    endOfMonth=is_end_of_bmonth,
+                )
+                for _, row in df.iterrows()
+            ]
+        except Exception as e:
+            # https://github.com/lballabio/QuantLib/issues/1405
+            if "degenerate" in str(e):
+                plus_one_bday_as_of_date = as_of_date + BDay(1)
+                ql.Settings.instance().evaluationDate = datetime_to_ql_date(plus_one_bday_as_of_date)
+                # https://github.com/lballabio/QuantLib/issues/700
+                with_payment_lag_helpers = [
+                    ql.OISRateHelper(
+                        settlement_t_plus,
+                        tenor_to_ql_period(row[tenor_col]),
+                        ql.QuoteHandle(ql.SimpleQuote(row[fixed_rate_col])),
+                        ql_index,
+                        paymentLag=payment_lag,
+                        paymentConvention=fixed_leg_convention,
+                        paymentCalendar=fixed_leg_calendar,
+                        paymentFrequency=fixed_leg_frequency if tenor_to_ql_period(row[tenor_col]) > ql.Period("18M") else ql.Once,
+                        pillar=ql.Pillar.MaturityDate,
+                        telescopicValueDates=False,
+                        endOfMonth=is_end_of_bmonth,
+                    )
+                    for _, row in df.iterrows()
+                ]
+            else:
+                raise e
+
         piecewise_with_payment_lag_params = [evaluation_date, with_payment_lag_helpers, fixed_leg_daycount]
 
     else:
@@ -525,7 +399,7 @@ def build_term_structure_df(
         | ql.PiecewiseLinearForward
         | ql.PiecewiseSplineCubicDiscount
     ),
-    interp_func: Callable = default_interp_func,
+    # interp_func: Callable = default_interp_func,
     tenor_col: str = "Tenor",
     fixed_rate_col: str = "Fixed Rate",
     fwd_rate_tenors: Optional[List[str]] = None,
@@ -554,20 +428,20 @@ def build_term_structure_df(
         zero_rates.append(zero_rate)
 
     x_interp = np.array([tenor_to_years(t) for t in df[tenor_col]])
-    scipy_interp_dict = {
-        "fixed_rate": interp_func(x_interp, rates),
-        "zero_rate": interp_func(x_interp, zero_rates),
-        "discount": interp_func(x_interp, discount_factors),
-    }
+    # scipy_interp_dict = {
+    #     "fixed_rate": interp_func(x_interp, rates),
+    #     "zero_rate": interp_func(x_interp, zero_rates),
+    #     "discount": interp_func(x_interp, discount_factors),
+    # }
 
     dict_for_df = {"Tenor": tenors, "Expiry": py_maturity_dates, "Fixed Rate": rates, "Zero Rate": zero_rates, "Discount": discount_factors}
     for fwd_rate_tenor in fwd_rate_tenors:
         dict_for_df[f"{fwd_rate_tenor} Fwd"] = [
             (curve.forwardRate(date, date + tenor_to_ql_period(fwd_rate_tenor), ql.Actual360(), ql.Simple).rate()) * 100 for date in ql_maturity_dates
         ]
-        scipy_interp_dict[f"{fwd_rate_tenor}_fwd"] = interp_func(x_interp, dict_for_df[f"{fwd_rate_tenor} Fwd"])
+        # scipy_interp_dict[f"{fwd_rate_tenor}_fwd"] = interp_func(x_interp, dict_for_df[f"{fwd_rate_tenor} Fwd"])
 
-    return pd.DataFrame(dict_for_df), scipy_interp_dict
+    return pd.DataFrame(dict_for_df)
 
 
 # curve/fly stuff

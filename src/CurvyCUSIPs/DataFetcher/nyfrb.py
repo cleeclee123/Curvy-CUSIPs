@@ -178,3 +178,15 @@ class NYFRBDataFetcher(DataFetcherBase):
                 for date in dates
             ]
             return tasks
+
+    def get_sofr_fixings_df(self, start_date: datetime, end_date: datetime):
+        url = f"https://markets.newyorkfed.org/api/rates/secured/sofr/search.json?startDate={start_date.strftime("%Y-%m-%d")}&endDate={end_date.strftime("%Y-%m-%d")}&type=rate"
+        res = requests.get(url, headers=build_treasurydirect_header(host_str="markets.newyorkfed.org"), proxies=self._proxies)
+        if res.ok:
+            json_data = res.json()
+            df = pd.DataFrame(json_data["refRates"])
+            df["effectiveDate"] = pd.to_datetime(df["effectiveDate"], errors="coerce")
+            df["percentRate"] = pd.to_numeric(df["percentRate"], errors="coerce")
+            return df
+        
+        raise ValueError(f"SOFR Fixings Bad Request - Status: {res.status_code} - Message: {res.content}")
