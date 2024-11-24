@@ -8,6 +8,8 @@ from functools import reduce
 from io import BytesIO
 from typing import Dict, List, Literal, Optional, Tuple, Union, Callable
 
+import io
+import requests
 import httpx
 import numpy as np
 import pandas as pd
@@ -22,7 +24,8 @@ from pandas.tseries.offsets import BDay, CustomBusinessDay
 from termcolor import colored
 
 from CurvyCUSIPs.DataFetcher.base import DataFetcherBase
-from CurvyCUSIPs.utils.dtcc_swaps_utils import build_ql_piecewise_curves, tenor_to_years, datetime_to_ql_date, DEFAULT_SWAP_TENORS
+from CurvyCUSIPs.DataFetcher.ShelveDBWrapper import ShelveDBWrapper
+from CurvyCUSIPs.utils.dtcc_swaps_utils import build_ql_piecewise_curves, tenor_to_years, expiry_to_tenor, datetime_to_ql_date, DEFAULT_SWAP_TENORS
 
 warnings.filterwarnings("ignore", category=pd.errors.SettingWithCopyWarning)
 warnings.simplefilter(action="ignore", category=FutureWarning)
@@ -59,6 +62,7 @@ class DTCCSDR_DataFetcher(DataFetcherBase):
         debug_verbose: Optional[bool] = False,
         info_verbose: Optional[bool] = False,
         error_verbose: Optional[bool] = False,
+        s490_curve_db_path: Optional[str] = None,
     ):
         super().__init__(
             global_timeout=global_timeout,
@@ -67,11 +71,69 @@ class DTCCSDR_DataFetcher(DataFetcherBase):
             info_verbose=info_verbose,
             error_verbose=error_verbose,
         )
+        self._anna_dsb_swaps_lookup_table_df = self._fetch_anna_dsb_upi_lookup_df("SWAP")
+        self._anna_dsb_swaption_lookup_table_df = self._fetch_anna_dsb_upi_lookup_df("SWAPTION")
+        self.s490_nyclose_db = ShelveDBWrapper(s490_curve_db_path) if s490_curve_db_path else None
 
-        # TODO make general plz
-        self.anna_dsb_swaps_lookup_table_df = pd.read_excel(
-            r"C:\Users\chris\Project Bond King\Curvy-CUSIPs\src\CurvyCUSIPs\data\anna_dsb\ff_swaps_loookup.xlsx"
+    def setup_s490_nyclose_db(self, s490_curve_db_path: str):
+        self.s490_nyclose_db = ShelveDBWrapper(s490_curve_db_path) if s490_curve_db_path else None
+        self.s490_nyclose_db.open()
+
+    def s490_nyclose_term_structure_ts(self, start_date: datetime, end_date: datetime):
+        bdates = pd.date_range(start=start_date, end=end_date, freq=CustomBusinessDay(calendar=USFederalHolidayCalendar()))
+        ts_term_structures = []
+        for curr_date in bdates:
+            try:
+                str_ts = str(int(curr_date.to_pydatetime().timestamp()))
+                ohlc_df = pd.DataFrame(self.s490_nyclose_db.get(str_ts)["ohlc"])
+                curr_term_structure = {"Date": curr_date}
+                curr_term_structure = curr_term_structure | dict(
+                    zip(DEFAULT_SWAP_TENORS, ohlc_df["Close"] * 100)
+                )
+                ts_term_structures.append(curr_term_structure)
+            except Exception as e:
+                # TODO handle errors
+                pass
+
+        return pd.DataFrame(ts_term_structures)
+
+    def _github_headers(self, path: str):
+        return {
+            "authority": "raw.githubusercontent.com",
+            "method": "GET",
+            "path": path,
+            "scheme": "https",
+            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+            "accept-encoding": "gzip, deflate, br, zstd",
+            "accept-language": "en-US,en;q=0.9",
+            "cache-control": "no-cache",
+            "dnt": "1",
+            "pragma": "no-cache",
+            "priority": "u=0, i",
+            "sec-ch-ua": '"Not)A;Brand";v="99", "Google Chrome";v="127", "Chromium";v="127"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "sec-fetch-dest": "document",
+            "sec-fetch-mode": "navigate",
+            "sec-fetch-site": "none",
+            "sec-fetch-user": "?1",
+            "upgrade-insecure-requests": "1",
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
+        }
+
+    def _fetch_anna_dsb_upi_lookup_df(self, type: Literal["SWAP", "SWAPTION", "CAPFLOOR"]):
+        anna_dsb_lookup_url_dict = {
+            "SWAP": "https://raw.githubusercontent.com/yieldcurvemonkey/ql_swap_curve_objs/refs/heads/main/anna_dsb_swaps_lookup_table_df.csv",
+            "SWAPTION": "https://raw.githubusercontent.com/yieldcurvemonkey/ql_swap_curve_objs/refs/heads/main/dsb_swaption_upis.csv",
+            "CAPFLOOR": "https://raw.githubusercontent.com/yieldcurvemonkey/ql_swap_curve_objs/refs/heads/main/dsb_capfloor_upis.csv",
+        }
+        res = requests.get(
+            anna_dsb_lookup_url_dict[type],
+            headers=self._github_headers(path=f"/yieldcurvemonkey/ql_swap_curve_objs/refs/heads/main/anna_dsb_swaps_lookup_table_df.csv"),
+            proxies=self._proxies,
         )
+        if res.ok:
+            return pd.read_csv(io.StringIO(res.content.decode("utf-8")))
 
     def _get_dtcc_url_and_header(
         self, agency: Literal["CFTC", "SEC"], asset_class: Literal["COMMODITIES", "CREDITS", "EQUITIES", "FOREX", "RATES"], date: datetime
@@ -443,7 +505,7 @@ class DTCCSDR_DataFetcher(DataFetcherBase):
             ],
         ] = {}
 
-        upi_lookup_df = self.anna_dsb_swaps_lookup_table_df
+        upi_lookup_df = self._anna_dsb_swaps_lookup_table_df
 
         UPIS = upi_lookup_df[
             (upi_lookup_df["Header_UseCase"] == swap_type)
@@ -468,7 +530,7 @@ class DTCCSDR_DataFetcher(DataFetcherBase):
                 try:
                     if time_and_sales_sdr_df is None or time_and_sales_sdr_df.empty:
                         raise ValueError("swaps_time_and_sales_df is empty")
-                    
+
                     if date < SCHEMA_CHANGE_2022:
                         swaps_time_and_sales_df: pd.DataFrame = format_swap_time_and_sales(
                             time_and_sales_sdr_df[
@@ -569,6 +631,10 @@ class DTCCSDR_DataFetcher(DataFetcherBase):
 
                     if overnight_fixings_df is not None:
                         on_fixing_rate_df = overnight_fixings_df[overnight_fixings_df[overnight_fixings_date_col].dt.date == date.date()]
+                        if on_fixing_rate_df.empty:
+                            prev_bday = date - BDay(1)
+                            on_fixing_rate_df = overnight_fixings_df[overnight_fixings_df[overnight_fixings_date_col].dt.date == prev_bday.date()] 
+                        
                         if on_fixing_rate_df.empty:
                             raise ValueError("Overnight Fixings Rate DF is empty")
 

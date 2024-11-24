@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Callable, Dict, List, Optional, Tuple
 from pandas.tseries.offsets import BDay, BMonthEnd
 
@@ -112,6 +112,70 @@ def tenor_to_years(tenor):
         return num
     else:
         raise ValueError(f"Unknown tenor unit: {tenor}")
+
+
+def expiry_to_tenor(expiry: datetime, as_of_date: datetime):
+    delta_days = (expiry - as_of_date).days
+    if delta_days < 0:
+        raise ValueError("Expiry date must be after the as_of_date.")
+    if delta_days == 1:
+        return "1D"
+    elif delta_days <= 7:
+        return "1W"
+    elif delta_days <= 14:
+        return "2W"
+    elif delta_days <= 21:
+        return "3W"
+    elif delta_days <= 31:
+        return "1M"
+    elif delta_days <= 61:
+        return "2M"
+    elif delta_days <= 92:
+        return "3M"
+    elif delta_days <= 122:
+        return "4M"
+    elif delta_days <= 152:
+        return "5M"
+    elif delta_days <= 183:
+        return "6M"
+    elif delta_days <= 274:
+        return "9M"
+    elif delta_days <= 365:
+        return "12M"
+    elif delta_days <= 547:
+        return "18M"
+    elif delta_days <= 730:
+        return "2Y"
+    elif delta_days <= 1095:
+        return "3Y"
+    elif delta_days <= 1460:
+        return "4Y"
+    elif delta_days <= 1825:
+        return "5Y"
+    elif delta_days <= 2190:
+        return "6Y"
+    elif delta_days <= 2555:
+        return "7Y"
+    elif delta_days <= 2920:
+        return "8Y"
+    elif delta_days <= 3285:
+        return "9Y"
+    elif delta_days <= 3650:
+        return "10Y"
+    elif delta_days <= 4380:
+        return "12Y"
+    elif delta_days <= 5475:
+        return "15Y"
+    elif delta_days <= 7300:
+        return "20Y"
+    elif delta_days <= 9125:
+        return "25Y"
+    elif delta_days <= 10950:
+        return "30Y"
+    elif delta_days <= 14600:
+        return "40Y"
+    else:
+        return "50Y"
 
 
 def get_sofr_ois(
@@ -442,6 +506,17 @@ def build_term_structure_df(
         # scipy_interp_dict[f"{fwd_rate_tenor}_fwd"] = interp_func(x_interp, dict_for_df[f"{fwd_rate_tenor} Fwd"])
 
     return pd.DataFrame(dict_for_df)
+
+
+def swap_spreads_term_structure(swaps_term_structure_ts_df: pd.DataFrame, cash_term_structure_ts_df: pd.DataFrame):
+    CT_TENORS = ["CT3M", "CT6M", "CT1", "CT2", "CT3", "CT5", "CT7", "CT10", "CT20", "CT30"]
+    SWAP_TENORS = ["3M", "6M", "12M", "2Y", "3Y", "5Y", "7Y", "10Y", "20Y", "30Y"]
+    aligned_index = swaps_term_structure_ts_df.index.intersection(cash_term_structure_ts_df.index)
+    swaps_aligned = swaps_term_structure_ts_df.loc[aligned_index, SWAP_TENORS]
+    cash_aligned = cash_term_structure_ts_df.loc[aligned_index, CT_TENORS]
+    swap_spreads = (swaps_aligned.subtract(cash_aligned.values, axis=0)) * 100
+
+    return swap_spreads
 
 
 # curve/fly stuff
