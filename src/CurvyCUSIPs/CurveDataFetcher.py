@@ -31,6 +31,7 @@ from CurvyCUSIPs.utils.QL_BondPricer import QL_BondPricer
 from CurvyCUSIPs.utils.RL_BondPricer import RL_BondPricer
 from CurvyCUSIPs.utils.ust_utils import get_active_cusips, get_last_n_off_the_run_cusips, is_valid_ust_cusip, ust_sorter, NoneReturningSpline
 from CurvyCUSIPs.DataFetcher.anna_dsb import AnnaDSB_DataFetcher
+from CurvyCUSIPs.DataFetcher.erisfutures import ErisFuturesDataFetcher
 
 warnings.filterwarnings("ignore", category=pd.errors.SettingWithCopyWarning)
 warnings.simplefilter(action="ignore", category=FutureWarning)
@@ -212,6 +213,14 @@ class CurveDataFetcher:
         )
 
         self.anna_dsb_fetcher = AnnaDSB_DataFetcher(
+            global_timeout=global_timeout,
+            proxies=proxies,
+            debug_verbose=debug_verbose,
+            info_verbose=info_verbose,
+            error_verbose=error_verbose,
+        )
+
+        self.eris_data_fethcer = ErisFuturesDataFetcher(
             global_timeout=global_timeout,
             proxies=proxies,
             debug_verbose=debug_verbose,

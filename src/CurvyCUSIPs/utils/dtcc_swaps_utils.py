@@ -1,15 +1,18 @@
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Callable, Dict, List, Optional, Tuple
-from pandas.tseries.offsets import BDay, BMonthEnd
 
 import numpy as np
 import pandas as pd
-import pandas.tseries.offsets as offsets
 import QuantLib as ql
 import rateslib as rl
 import scipy
 import scipy.interpolate
+from dateutil.relativedelta import relativedelta
+from pandas.tseries.offsets import BDay, BMonthEnd
 from termcolor import colored
+
+UPI_MIGRATE_DATE = datetime(2024, 1, 29)
+SCHEMA_CHANGE_2022 = datetime(2022, 12, 3)
 
 DEFAULT_SWAP_TENORS = [
     "1D",
@@ -244,29 +247,6 @@ def build_ql_piecewise_curves(
         else:
             raise e
 
-    # settlementDays,
-    # Period tenor,
-    # QuoteHandle rate,
-    # ext::shared_ptr< OvernightIndex > const & index,
-    # YieldTermStructureHandle discountingCurve={},
-    # bool telescopicValueDates=False,
-    # Integer paymentLag=0,
-    # BusinessDayConvention paymentConvention=Following,
-    # Frequency paymentFrequency=Annual,
-    # Calendar paymentCalendar=Calendar(),
-    # Period forwardStart=0*Days,
-    # Spread const overnightSpread=0.0,
-    # Pillar::Choice pillar=LastRelevantDate,
-    # Date customPillarDate=Date(),
-    # RateAveraging::Type averagingMethod=Compound,
-    # ext::optional< bool > endOfMonth=ext::nullopt,
-    # ext::optional< Frequency > fixedPaymentFrequency=ext::nullopt,
-    # Calendar fixedCalendar=Calendar(),
-    # Natural lookbackDays=Null< Natural >(),
-    # Natural lockoutDays=0,
-    # bool applyObservationShift=False,
-    # ext::shared_ptr< FloatingRateCouponPricer > const & pricer={})
-
     # examples:
     # https://quant.stackexchange.com/questions/64342/rfr-boostrapping-using-rfr-ois-is-convexity-adjustment-technically-necessary?rq=1
     # https://quant.stackexchange.com/questions/74766/bootstrapping-sofr-curve-and-swap-payment-lag
@@ -451,111 +431,364 @@ def build_ql_piecewise_curves(
 
     return piecewise_curves
 
+def format_swap_time_and_sales(df: pd.DataFrame, as_of_date: datetime, tenors_to_interpolate: Optional[List[str] | bool] = None, verbose=False):
+    swap_columns = [
+        "Event timestamp",
+        "Execution Timestamp",
+        "Effective Date",
+        "Expiration Date",
+        # "Platform identifier",
+        "Tenor",
+        "Fwd",
+        "Fixed Rate",
+        "Direction",
+        "Notional Amount",
+        "Unique Product Identifier",
+        "UPI FISN",
+        "UPI Underlier Name",
+    ]
 
-def build_term_structure_df(
+    if as_of_date < SCHEMA_CHANGE_2022:
+        df = df.rename(
+            columns={
+                "Event Timestamp": "Event timestamp",
+                "Leg 1 - Floating Rate Index": "Underlier ID-Leg 1",
+                "Leg 2 - Floating Rate Index": "Underlier ID-Leg 2",
+                "Fixed Rate 1": "Fixed rate-Leg 1",
+                "Fixed Rate 2": "Fixed rate-Leg 2",
+                "Notional Amount 1": "Notional amount-Leg 1",
+                "Notional Amount 2": "Notional amount-Leg 2",
+            }
+        )
+
+    if as_of_date < UPI_MIGRATE_DATE or as_of_date < SCHEMA_CHANGE_2022:
+        df["Unique Product Identifier"] = "DNE"
+        df["UPI FISN"] = "DNE"
+        df["UPI Underlier Name"] = df["Underlier ID-Leg 1"].combine_first(df["Underlier ID-Leg 2"])
+
+    date_columns = [
+        "Event timestamp",
+        "Execution Timestamp",
+        "Effective Date",
+        "Expiration Date",
+    ]
+    for col in date_columns:
+        df[col] = pd.to_datetime(df[col])
+        df[col] = df[col].dt.tz_localize(None)
+
+    df = df[df["Event timestamp"].dt.date >= as_of_date.date()]
+    df = df[df["Execution Timestamp"].dt.date >= as_of_date.date()]
+
+    year_day_count = 360
+    df["Expiry (d)"] = (df["Expiration Date"] - df["Effective Date"]).dt.days
+    df["Expiry (w)"] = df["Expiry (d)"] / 7
+    df["Expiry (m)"] = df["Expiry (d)"] / 30
+    df["Expiry (yr)"] = df["Expiry (d)"] / year_day_count
+
+    settle_date = as_of_date + BDay(2)
+    df["Fwd (d)"] = (df["Effective Date"] - settle_date).dt.days
+    df["Fwd (w)"] = df["Fwd (d)"] / 7
+    df["Fwd (m)"] = df["Fwd (d)"] / 30
+    df["Fwd (yr)"] = df["Fwd (d)"] / year_day_count
+
+    def format_tenor(row: pd.Series, col: str):
+        if row[f"{col} (d)"] < 7:
+            return f"{int(row[f'{col} (d)'])}D"
+        if row[f"{col} (w)"] <= 3.75:
+            return f"{int(row[f'{col} (w)'])}W"
+        if row[f"{col} (m)"] < 23.5:
+            return f"{int(row[f'{col} (m)'])}M"
+        return f"{int(row[f'{col} (yr)'])}Y"
+
+    df["Tenor"] = df.apply(lambda row: format_tenor(row, col="Expiry"), axis=1)
+    df["Fwd"] = df.apply(lambda row: format_tenor(row, col="Fwd"), axis=1)
+
+    df["Notional amount-Leg 1"] = pd.to_numeric(df["Notional amount-Leg 1"].str.replace(",", ""), errors="coerce")
+    df["Notional amount-Leg 2"] = pd.to_numeric(df["Notional amount-Leg 2"].str.replace(",", ""), errors="coerce")
+    df["Notional Amount"] = df["Notional amount-Leg 1"].combine_first(df["Notional amount-Leg 2"])
+    df["Fixed rate-Leg 1"] = pd.to_numeric(df["Fixed rate-Leg 1"], errors="coerce")
+    df["Fixed rate-Leg 2"] = pd.to_numeric(df["Fixed rate-Leg 2"], errors="coerce")
+    df["Fixed Rate"] = df["Fixed rate-Leg 1"].combine_first(df["Fixed rate-Leg 2"])
+    df["Direction"] = df.apply(
+        lambda row: "receive" if pd.notna(row["Fixed rate-Leg 1"]) else ("pay" if pd.notna(row["Fixed rate-Leg 2"]) else None), axis=1
+    )
+
+    # let ignore negative rates
+    df = df[df["Fixed Rate"] > 0]
+    df = df[(df["Notional Amount"] > 0) & (df["Notional Amount"].notna())]
+
+    df = df.drop(
+        columns=[
+            "Fixed rate-Leg 1",
+            "Fixed rate-Leg 2",
+            "Expiry (d)",
+            "Expiry (m)",
+            "Expiry (yr)",
+        ]
+    )
+
+    if tenors_to_interpolate is not None:
+        print("Tenors that will be Interpolated: ", tenors_to_interpolate) if verbose else None
+        df = df[~df["Tenor"].isin(set(tenors_to_interpolate))]
+
+    return df[swap_columns]
+
+
+def scipy_linear_interp_func(xx, yy, kind="linear", logspace=False):
+    if logspace:
+        log_y = np.log(yy)
+        interp_func = scipy.interpolate.interp1d(xx, log_y, kind="linear", fill_value="extrapolate", bounds_error=False)
+
+        def log_linear_interp(x_new):
+            return np.exp(interp_func(x_new))
+
+        return log_linear_interp
+
+    return scipy.interpolate.interp1d(xx, yy, kind=kind, fill_value="extrapolate", bounds_error=False)
+
+def format_swap_ohlc(
     df: pd.DataFrame,
     as_of_date: datetime,
-    curve: (
-        ql.PiecewiseLogLinearDiscount
-        | ql.PiecewiseLogCubicDiscount
-        | ql.PiecewiseLinearZero
-        | ql.PiecewiseCubicZero
-        | ql.PiecewiseLinearForward
-        | ql.PiecewiseSplineCubicDiscount
-    ),
-    # interp_func: Callable = default_interp_func,
-    tenor_col: str = "Tenor",
-    fixed_rate_col: str = "Fixed Rate",
-    fwd_rate_tenors: Optional[List[str]] = None,
-) -> Tuple[pd.DataFrame | Dict[str, scipy.interpolate.interp1d]]:
-    if not isinstance(as_of_date, ql.Date):
-        evaluation_date = datetime_to_ql_date(as_of_date)
+    overnight_rate: Optional[float] = None,
+    minimum_time_and_sales_trades: int = 100,
+    dtcc_interp_func: Optional[Callable] = scipy_linear_interp_func,
+    default_tenors=DEFAULT_SWAP_TENORS,
+    filter_extreme_time_and_sales=False,
+    quantile_smoothing_range: Optional[Tuple[float, float]] = None,
+    specifc_tenor_quantile_smoothing_range: Optional[Dict[str, Tuple[float, float]]] = None,
+    remove_tenors: Optional[List[str]] = None,
+    t_plus_another_one=False,
+    ny_hours=False,
+    # is_intraday=False,
+    verbose=False,
+):
+    filtered_df = df[(df["Fwd"] == "0D")]
 
-    calendar = ql.UnitedStates(ql.UnitedStates.FederalReserve)
-    settlement_date: ql.Date = calendar.advance(evaluation_date, ql.Period(2, ql.Days))
-    tenors: List[ql.Period] = []
-    rates: List[float] = []
-    py_maturity_dates: List[datetime] = []
-    ql_maturity_dates: List[ql.Date] = []
-    zero_rates: List[float] = []
-    discount_factors: List[float] = []
-    for tenor, rate in dict(zip(df[tenor_col], df[fixed_rate_col])).items():
-        tenor = tenor_to_ql_period(tenor)
-        tenors.append(tenor)
-        rates.append(rate * 100)
-        maturity_date: ql.Date = calendar.advance(settlement_date, tenor, ql.ModifiedFollowing, True)
-        ql_maturity_dates.append(maturity_date)
-        py_maturity_dates.append(maturity_date.to_date())
-        discount_factor: float = curve.discount(maturity_date)
-        discount_factors.append(discount_factor)
-        zero_rate: float = -100.0 * np.log(discount_factor) * 365.0 / (maturity_date - evaluation_date)
-        zero_rates.append(zero_rate)
+    if len(filtered_df) < minimum_time_and_sales_trades:
+        t_plus_another_one = True
 
-    x_interp = np.array([tenor_to_years(t) for t in df[tenor_col]])
-    # scipy_interp_dict = {
-    #     "fixed_rate": interp_func(x_interp, rates),
-    #     "zero_rate": interp_func(x_interp, zero_rates),
-    #     "discount": interp_func(x_interp, discount_factors),
-    # }
+    if filtered_df.empty or t_plus_another_one:
+        (
+            print(f'Initial OHLC Filtering Results: {len(filtered_df)} < {minimum_time_and_sales_trades} --- Enabled "t_plus_another_one"')
+            if verbose
+            else None
+        )
+        filtered_df = df[(df["Fwd"] == "0D") | (df["Fwd"] == "1D")]
 
-    dict_for_df = {"Tenor": tenors, "Expiry": py_maturity_dates, "Fixed Rate": rates, "Zero Rate": zero_rates, "Discount": discount_factors}
-    for fwd_rate_tenor in fwd_rate_tenors:
-        dict_for_df[f"{fwd_rate_tenor} Fwd"] = [
-            (curve.forwardRate(date, date + tenor_to_ql_period(fwd_rate_tenor), ql.Actual360(), ql.Simple).rate()) * 100 for date in ql_maturity_dates
-        ]
-        # scipy_interp_dict[f"{fwd_rate_tenor}_fwd"] = interp_func(x_interp, dict_for_df[f"{fwd_rate_tenor} Fwd"])
+    if filtered_df.empty or len(filtered_df) < minimum_time_and_sales_trades:
+        (
+            print(f'Initial OHLC Filtering Results: {len(filtered_df)} < {minimum_time_and_sales_trades} --- Enabled "t_plus_another_two"')
+            if verbose
+            else None
+        )
+        filtered_df = df[(df["Fwd"] == "0D") | (df["Fwd"] == "1D") | (df["Fwd"] == "2D")]
 
-    return pd.DataFrame(dict_for_df)
+    if filtered_df.empty or len(filtered_df) < minimum_time_and_sales_trades:
+        (
+            print(f'Initial OHLC Filtering Results: {len(filtered_df)} < {minimum_time_and_sales_trades} --- Enabled "t_plus_another_three"')
+            if verbose
+            else None
+        )
+        filtered_df = df[(df["Fwd"] == "0D") | (df["Fwd"] == "1D") | (df["Fwd"] == "2D") | (df["Fwd"] == "3D")]
+
+    if filtered_df.empty or len(filtered_df) < minimum_time_and_sales_trades:
+        (
+            print(f'Initial OHLC Filtering Results: {len(filtered_df)} < {minimum_time_and_sales_trades} --- Enabled "t_plus_another_four"')
+            if verbose
+            else None
+        )
+        filtered_df = df[(df["Fwd"] == "0D") | (df["Fwd"] == "1D") | (df["Fwd"] == "2D") | (df["Fwd"] == "3D") | (df["Fwd"] == "4D")]
+
+    if filter_extreme_time_and_sales and quantile_smoothing_range:
+        filtered_df = filtered_df.groupby(["Tenor", "Fwd"], group_keys=False).apply(
+            lambda group: group[
+                (group["Fixed Rate"] > group["Fixed Rate"].quantile(quantile_smoothing_range[0]))
+                & (group["Fixed Rate"] < group["Fixed Rate"].quantile(quantile_smoothing_range[1]))
+            ]
+        )
+
+    if specifc_tenor_quantile_smoothing_range:
+        for tenor, quantile_range in specifc_tenor_quantile_smoothing_range.items():
+            lower_quantile = filtered_df[filtered_df["Tenor"] == tenor]["Fixed Rate"].quantile(quantile_range[0])
+            upper_quantile = filtered_df[filtered_df["Tenor"] == tenor]["Fixed Rate"].quantile(quantile_range[1])
+            filtered_df = filtered_df[
+                ~((filtered_df["Tenor"] == tenor) & ((filtered_df["Fixed Rate"] < lower_quantile) | (filtered_df["Fixed Rate"] > upper_quantile)))
+            ]
+
+    if remove_tenors:
+        for rm_tenor in remove_tenors:
+            filtered_df = filtered_df[filtered_df["Tenor"] != rm_tenor]
+
+    filtered_df = filtered_df.sort_values(by=["Tenor", "Execution Timestamp", "Fixed Rate"], ascending=True)
+
+    if ny_hours:
+        filtered_df = filtered_df[filtered_df["Execution Timestamp"].dt.hour >= 12]
+        filtered_df = filtered_df[filtered_df["Execution Timestamp"].dt.hour <= 23]
+
+    tenor_df = (
+        filtered_df.groupby("Tenor")
+        .agg(
+            Open=("Fixed Rate", "first"),
+            High=("Fixed Rate", "max"),
+            Low=("Fixed Rate", "min"),
+            Close=("Fixed Rate", "last"),
+            VWAP=(
+                "Fixed Rate",
+                lambda x: (x * filtered_df.loc[x.index, "Notional Amount"]).sum() / filtered_df.loc[x.index, "Notional Amount"].sum(),
+            ),
+        )
+        .reset_index()
+    )
+
+    tenor_df["Tenor"] = pd.Categorical(tenor_df["Tenor"], categories=sorted(tenor_df["Tenor"], key=lambda x: (x[-1], int(x[:-1]))))
+    tenor_df["Expiry"] = [rl.add_tenor(as_of_date + BDay(2), _, "F", "nyc") for _ in tenor_df["Tenor"]]
+    tenor_df = tenor_df.sort_values("Expiry").reset_index(drop=True)
+    tenor_df = tenor_df[["Tenor", "Open", "High", "Low", "Close", "VWAP"]]
+    tenor_df = tenor_df[tenor_df["Tenor"].isin(default_tenors)].reset_index(drop=True)
+
+    if dtcc_interp_func is not None:
+        x = np.array([tenor_to_years(t) for t in tenor_df["Tenor"]])
+        x_new = np.array([tenor_to_years(t) for t in default_tenors])
+        interp_df = pd.DataFrame({"Tenor": default_tenors})
+
+        tenor_map = {
+            tenor_to_years(t): {col: tenor_df.loc[tenor_df["Tenor"] == t, col].values[0] for col in ["Open", "High", "Low", "Close", "VWAP"]}
+            for t in tenor_df["Tenor"]
+        }
+
+        for col in ["Open", "High", "Low", "Close", "VWAP"]:
+            y = tenor_df[col].values
+
+            if overnight_rate is not None:
+                x = np.array([1 / 360] + [tenor_to_years(t) for t in tenor_df["Tenor"]])
+                x_new = np.array([tenor_to_years(t) for t in default_tenors])
+                y = [overnight_rate] + list(y)
+                y_new = dtcc_interp_func(x, y)(x_new)
+            else:
+                y_new = dtcc_interp_func(x, y)(x_new)
+
+            interp_df[col] = [
+                tenor_map[tenor_to_years(t)][col] if tenor_to_years(t) in tenor_map else y_val for t, y_val in zip(default_tenors, y_new)
+            ]
+
+        interp_df.insert(1, "Expiry", [rl.add_tenor(as_of_date + BDay(2), _, "F", "nyc") for _ in interp_df["Tenor"]])
+        interp_df = interp_df.sort_values("Expiry").reset_index(drop=True)
+
+        return interp_df
+
+    return tenor_df
 
 
-def swap_spreads_term_structure(swaps_term_structure_ts_df: pd.DataFrame, cash_term_structure_ts_df: pd.DataFrame):
-    CT_TENORS = ["CT3M", "CT6M", "CT1", "CT2", "CT3", "CT5", "CT7", "CT10", "CT20", "CT30"]
-    SWAP_TENORS = ["3M", "6M", "12M", "2Y", "3Y", "5Y", "7Y", "10Y", "20Y", "30Y"]
-    aligned_index = swaps_term_structure_ts_df.index.intersection(cash_term_structure_ts_df.index)
-    swaps_aligned = swaps_term_structure_ts_df.loc[aligned_index, SWAP_TENORS]
-    cash_aligned = cash_term_structure_ts_df.loc[aligned_index, CT_TENORS]
-    swap_spreads = (swaps_aligned.subtract(cash_aligned.values, axis=0)) * 100
+def calculate_tenor_combined(effective_date, expiration_date):
+    delta = relativedelta(expiration_date, effective_date)
+    tenor_parts = []
 
-    return swap_spreads
+    if delta.years == 0:
+        if delta.months > 0:
+            if delta.days > 0:
+                days = delta.months * 30 + delta.days
+                if days % 30 <= 5 or days % 30 >= 25:
+                    return f"{round(days / 30)}M"
+                return f"{days}D"
+            return f"{delta.months}M"
+
+        if delta.days == 0:
+            return "1D"
+        days = delta.months * 30 + delta.days
+        if days % 30 <= 5 or days % 30 >= 25 or days >= 25:
+            return f"{round(days / 30)}M"
+        return f"{delta.days}D"
+
+    has_months = False
+    if delta.years > 0:
+        tenor_parts.append(f"{delta.years}Y")
+    if delta.months > 0:
+        tenor_parts.append(f"{delta.months}M")
+        has_months = True
+    if delta.days > 10 and has_months:
+        days = (delta.years * 365) + (delta.months * 30) + delta.days
+        if days % 30 < 5 or days % 30 > 25:
+            return f"{round(days / 30)}M"
+        return f"{days}D"
+
+    if len(tenor_parts) == 1 and delta.years == 1:
+        return "12M"
+
+    return "".join(tenor_parts)
 
 
-# curve/fly stuff
-"""
-sofr_ois_swaps_pcakage_df = sdr_df[(sdr_df["Unique Product Identifier"] == underlying_dict["Identifier_UPI"]) & (sdr_df["Package indicator"] == True)]
-df = sofr_ois_swaps_pcakage_df 
-df['Effective Date'] = pd.to_datetime(df['Effective Date'])
-df['Expiration Date'] = pd.to_datetime(df['Expiration Date'])
+def format_vanilla_swaption_time_and_sales(df: pd.DataFrame, as_of_date: datetime):
+    swap_columns = [
+        # "Action type",
+        # "Event type",
+        "Event timestamp",
+        "Execution Timestamp",
+        "Effective Date",
+        "Expiration Date",
+        "Maturity date of the underlier",
+        "Fwd",
+        "Option Tenor",
+        "Underlying Tenor",
+        "Strike Price",
+        "Option Premium Amount",
+        "Notional Amount",
+        "Option Premium per Notional",
+        "Direction",
+        "Style",
+        # "Package indicator",
+        "Unique Product Identifier",
+        "UPI FISN",
+        "UPI Underlier Name",
+    ]
 
-# Calculate tenor in years for each trade
-df['Tenor'] = ((df['Expiration Date'] - df['Effective Date']).dt.days / 360).round()
+    if as_of_date < UPI_MIGRATE_DATE:
+        # not consistent among reported - assume none are fwd vol traded
+        df["Effective Date"] = as_of_date
+        df["Unique Product Identifier"] = "DNE"
+        df["UPI FISN"] = "DNE"
+        df["UPI Underlier Name"] = df["Underlier ID-Leg 1"].combine_first(df["Underlier ID-Leg 2"])
 
-# Group trades by Event timestamp to identify related legs
-grouped = df.groupby('Event timestamp')
+    date_columns = [
+        "Event timestamp",
+        "Execution Timestamp",
+        "Effective Date",
+        "Expiration Date",
+        "Maturity date of the underlier",
+        "First exercise date",
+    ]
+    for col in date_columns:
+        df[col] = pd.to_datetime(df[col], errors="coerce")
+        df[col] = df[col].dt.tz_localize(None)
 
-curve_structures = []
+    df = df[df["Event timestamp"].dt.date >= as_of_date.date()]
+    df = df[df["Execution Timestamp"].dt.date >= as_of_date.date()]
+    # df = df[df["Expiration Date"].dt.date == df["First exercise date"].dt.date]
 
-for timestamp, group in grouped:
-    if len(group) > 1:  # Multiple trades with same timestamp are likely part of a curve
-        tenors = sorted(group['Tenor'].unique())
-        
-        # Create curve trade description
-        if len(tenors) == 2:
-            curve_structures.append({
-                'timestamp': timestamp,
-                'structure': f"{int(tenors[0])}s{int(tenors[-1])}s",
-                'tenors': tenors,
-                'rates': group['Fixed rate-Leg 1'].tolist(),
-                'notionals': group['Notional amount-Leg 1'].tolist()
-            })
-        elif len(tenors) == 3:
-            curve_structures.append({
-                'timestamp': timestamp,
-                'structure': f"{int(tenors[0])}s{int(tenors[1])}s{int(tenors[-1])}s",
-                'tenors': tenors,
-                'rates': group['Fixed rate-Leg 1'].tolist(),
-                'notionals': group['Notional amount-Leg 1'].tolist()
-            })
+    df["Notional Amount"] = df["Notional amount-Leg 1"].combine_first(df["Notional amount-Leg 2"])
+    df = df[(df["Notional Amount"] > 0) & (df["Notional Amount"].notna())]
+    df["Fixed rate-Leg 1"] = pd.to_numeric(df["Fixed rate-Leg 1"], errors="coerce")
+    df["Fixed rate-Leg 2"] = pd.to_numeric(df["Fixed rate-Leg 2"], errors="coerce")
+    df["Strike Price"] = pd.to_numeric(df["Strike Price"], errors="coerce")
+    df = df[df["Strike Price"] > 0]
+    df = df[df["Strike Price"] == df["Fixed rate-Leg 1"].combine_first(df["Fixed rate-Leg 2"])]
+    df["Direction"] = df.apply(
+        lambda row: "buyer" if pd.notna(row["Fixed rate-Leg 1"]) else ("underwritter" if pd.notna(row["Fixed rate-Leg 2"]) else None), axis=1
+    )
 
-pd.DataFrame(curve_structures)
+    if as_of_date < UPI_MIGRATE_DATE:
+        df["Style"] = df["Option Type"].str.lower()
+    else:
+        df["Style"] = df.apply(
+            lambda row: ("receiver" if "NA/O P Epn" in row["UPI FISN"] else ("payer" if "NA/O Call Epn" in row["UPI FISN"] else row["UPI FISN"])),
+            axis=1,
+        )
 
-"""
+    df["Option Tenor"] = df.apply(
+        lambda row: calculate_tenor_combined(effective_date=row["Effective Date"], expiration_date=row["First exercise date"]), axis=1
+    )
+    df["Underlying Tenor"] = df.apply(
+        lambda row: calculate_tenor_combined(effective_date=row["First exercise date"], expiration_date=row["Maturity date of the underlier"]), axis=1
+    )
+    df["Fwd"] = df.apply(lambda row: f"{(row["Effective Date"] - as_of_date).days}D", axis=1)
+    df["Option Premium per Notional"] = df["Option Premium Amount"] / df["Notional Amount"]
+    return df[swap_columns]

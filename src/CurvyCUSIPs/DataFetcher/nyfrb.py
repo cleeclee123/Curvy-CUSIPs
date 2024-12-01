@@ -185,8 +185,10 @@ class NYFRBDataFetcher(DataFetcherBase):
         if res.ok:
             json_data = res.json()
             df = pd.DataFrame(json_data["refRates"])
+            if df.empty:
+                raise ValueError("SOFR df is empty")
             df["effectiveDate"] = pd.to_datetime(df["effectiveDate"], errors="coerce")
             df["percentRate"] = pd.to_numeric(df["percentRate"], errors="coerce")
             return df
-        
+
         raise ValueError(f"SOFR Fixings Bad Request - Status: {res.status_code} - Message: {res.content}")

@@ -27,3 +27,9 @@ class ShelveDBWrapper:
             self.db[key] = value
         else:
             raise RuntimeError("Database is not open.")
+
+    def keys(self):
+        if self.db is not None:
+            return self.db.keys() 
+        else:
+            raise RuntimeError("Database is not open.")
