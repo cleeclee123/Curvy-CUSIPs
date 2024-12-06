@@ -68,14 +68,14 @@ python update_sofr_ois._db.py
 
 ## Checkout examples in `\notebooks`:
 
-### usts_basics.ipynb
+### [usts_basics.ipynb](https://github.com/yieldcurvemonkey/Curvy-CUSIPs/blob/main/notebooks/usts_basics.ipynb)
 - Yield Curve Plotting
 - CT Yields Dataframe
 - CUSIP look up
 - CUSIP plotting
 - Spread, Flies plotting
 
-### usts_basics.ipynb
+### [swaps_basics.ipynb](https://github.com/yieldcurvemonkey/Curvy-CUSIPs/blob/main/notebooks/swaps_basics.ipynb)
 - SOFR OIS Curve Ploting
 - SOFR OIS Swap Spreads
 - Spread, Flies plotting
