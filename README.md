@@ -82,6 +82,8 @@ python update_sofr_ois._db.py
 - Swap Fwds
 
 ### [par_curves.ipynb](https://github.com/yieldcurvemonkey/Curvy-CUSIPs/blob/main/notebooks/par_curves.ipynb)
+- Plot your splines/par curve model against all active CUSIPs on a historical date
+- Example shown is a textbook par model: filter based on some liquidity premium then fit a cubic spline
 
 ![womp womp](./dump/Screenshot%202024-12-05%20221335.png)
 
