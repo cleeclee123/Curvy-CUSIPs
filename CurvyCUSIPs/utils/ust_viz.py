@@ -270,11 +270,13 @@ def plot_usts(
     ust_labels_highlighter: Optional[List[Tuple[str, str] | str]] = None,
     plot_par_model_residuals: Optional[bool] = False,
     linspace_num: Optional[int] = 1000,
-    y_axis_range: Optional[Annotated[List[int], 2]] = [3, 5.5],
     plot_height=1000,
     plot_width=None,
 ):
     curve_set_df = curve_set_df.copy()
+
+    # how i price tbills with rateslib is still a bit janky so not to throw off our plotting i will filter
+    curve_set_df = curve_set_df[curve_set_df[ytm_col] < curve_set_df[ytm_col].quantile(0.985)] 
 
     if cusips_filter:
         curve_set_df = curve_set_df[curve_set_df["cusip"].isin(cusips_filter)]
@@ -563,7 +565,6 @@ def plot_usts(
         spikecolor="white",
         spikesnap="cursor",
         spikethickness=0.5,
-        range=y_axis_range,
     )
     fig.show(
         config={

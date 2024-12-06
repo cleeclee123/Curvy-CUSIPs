@@ -13,7 +13,7 @@ from sklearn.linear_model import LinearRegression
 from termcolor import colored
 
 from CurvyCUSIPs.CurveBuilder import calc_ust_impl_spot_n_fwd_curve, calc_ust_metrics
-from CurvyCUSIPs.CurveDataFetcher import CurveDataFetcher
+from CurvyCUSIPs.USTs import USTs
 from CurvyCUSIPs.utils.arbitragelab import EngleGrangerPortfolio, JohansenPortfolio, construct_spread
 from CurvyCUSIPs.utils.regression_utils import run_odr
 
@@ -22,7 +22,7 @@ def dv01_neutral_curve_hegde_ratio(
     as_of_date: datetime,
     front_leg_bond_row: Dict | pd.Series,
     back_leg_bond_row: Dict | pd.Series,
-    curve_data_fetcher: CurveDataFetcher,
+    usts_obj: USTs,
     scipy_interp_curve: scipy.interpolate.interpolate,
     repo_rate: float,
     quote_type: Optional[str] = "eod",
@@ -38,8 +38,8 @@ def dv01_neutral_curve_hegde_ratio(
     if isinstance(back_leg_bond_row, pd.Series) or isinstance(back_leg_bond_row, pd.DataFrame):
         back_leg_bond_row = back_leg_bond_row.to_dict("records")[0]
 
-    front_leg_info = curve_data_fetcher.ust_data_fetcher.cusip_to_ust_label(cusip=front_leg_bond_row["cusip"])
-    back_leg_info = curve_data_fetcher.ust_data_fetcher.cusip_to_ust_label(cusip=back_leg_bond_row["cusip"])
+    front_leg_info = usts_obj.cusip_to_ust_label(cusip=front_leg_bond_row["cusip"])
+    back_leg_info = usts_obj.cusip_to_ust_label(cusip=back_leg_bond_row["cusip"])
 
     front_leg_metrics = calc_ust_metrics(
         bond_info=front_leg_info,
@@ -148,7 +148,7 @@ def dv01_neutral_butterfly_hegde_ratio(
     front_wing_bond_row: Dict | pd.Series,
     belly_bond_row: Dict | pd.Series,
     back_wing_bond_row: Dict | pd.Series,
-    curve_data_fetcher: CurveDataFetcher,
+    usts_obj: USTs,
     scipy_interp_curve: scipy.interpolate.interpolate,
     repo_rate: float,
     quote_type: Optional[str] = "eod",
@@ -168,9 +168,9 @@ def dv01_neutral_butterfly_hegde_ratio(
     if isinstance(back_wing_bond_row, pd.Series) or isinstance(back_wing_bond_row, pd.DataFrame):
         back_wing_bond_row = back_wing_bond_row.to_dict("records")[0]
 
-    front_wing_info = curve_data_fetcher.ust_data_fetcher.cusip_to_ust_label(cusip=front_wing_bond_row["cusip"])
-    belly_info = curve_data_fetcher.ust_data_fetcher.cusip_to_ust_label(cusip=belly_bond_row["cusip"])
-    back_wing_info = curve_data_fetcher.ust_data_fetcher.cusip_to_ust_label(cusip=back_wing_bond_row["cusip"])
+    front_wing_info = usts_obj.ust_data_fetcher.cusip_to_ust_label(cusip=front_wing_bond_row["cusip"])
+    belly_info = usts_obj.ust_data_fetcher.cusip_to_ust_label(cusip=belly_bond_row["cusip"])
+    back_wing_info = usts_obj.ust_data_fetcher.cusip_to_ust_label(cusip=back_wing_bond_row["cusip"])
 
     front_wing_metrics = calc_ust_metrics(
         bond_info=front_wing_info,

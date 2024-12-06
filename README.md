@@ -87,6 +87,14 @@ python update_sofr_ois._db.py
 
 ![womp womp](./dump/Screenshot%202024-12-05%20221335.png)
 
+### [jpm_rv_example.ipynb](https://github.com/yieldcurvemonkey/Curvy-CUSIPs/blob/main/notebooks/jpm_rv_example.ipynb)
+- Thats a pretty good fit given that we are using publicly sourced data!
+- The par model in the example is loosely based (same knot points) on JPM's [par curve model](https://github.com/yieldcurvemonkey/Curvy-CUSIPs/blob/main/research/Linear/JPM%20Rates%20Strategy%20The%20(par)%20curves%20they%20are%20a-changin%E2%80%99%20Making%20enhancements%20to%20our%20Treasury%20%26%20TIPS%20par%20curves.%20Tue%20Jul%2023%202024.pdf), so we should expect that our residuals are similar
+
+![womp womp](./dump/Screenshot%202024-12-05%20225137.png)
+![womp womp](./dump/Screenshot%202024-12-05%20224928.png)
+
+
 ### [sabr_smile.ipynb](https://github.com/yieldcurvemonkey/Curvy-CUSIPs/blob/main/notebooks/sabr_smile.ipynb)
 
 ![til](./dump/sabrsmileexample.gif)

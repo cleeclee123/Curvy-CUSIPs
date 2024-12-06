@@ -20,11 +20,15 @@ pylab.rcParams.update(params)
 
 import seaborn as sns
 
-from CurvyCUSIPs.CurveDataFetcher import CurveDataFetcher
-from CurvyCUSIPs.CurveInterpolator import GeneralCurveInterpolator
+from CurvyCUSIPs.USTs import USTs
 from CurvyCUSIPs.CurveBuilder import calc_ust_metrics
 from CurvyCUSIPs.utils.ust_viz import plot_usts
-from CurvyCUSIPs.utils.regression_utils import run_basic_linear_regression, run_basic_linear_regression_df, plot_residuals_timeseries, run_rolling_regression_df
+from CurvyCUSIPs.utils.regression_utils import (
+    run_basic_linear_regression,
+    run_basic_linear_regression_df,
+    plot_residuals_timeseries,
+    run_rolling_regression_df,
+)
 
 sns.set(style="whitegrid", palette="dark")
 
@@ -35,7 +39,7 @@ warnings.filterwarnings("ignore", category=pd.errors.SettingWithCopyWarning)
 
 
 def cusip_spread_rv_regression(
-    curve_data_fetcher: CurveDataFetcher,
+    usts_obj: USTs,
     label1: str,
     label2: str,
     cusip_timeseries: Dict[str, List[Dict[str, str | float | int]]],
@@ -51,8 +55,8 @@ def cusip_spread_rv_regression(
     if not main_spline_key:
         main_spline_key = list(fitted_splines_timeseries_dict.keys())[0]
 
-    cusip1 = curve_data_fetcher.ust_data_fetcher.ust_label_to_cusip(label1)["cusip"]
-    cusip2 = curve_data_fetcher.ust_data_fetcher.ust_label_to_cusip(label2)["cusip"]
+    cusip1 = usts_obj.ust_label_to_cusip(label1)["cusip"]
+    cusip2 = usts_obj.ust_label_to_cusip(label2)["cusip"]
     cusip1_df = pd.DataFrame(cusip_timeseries[cusip1]).sort_values(by=["Date"])
     cusip2_df = pd.DataFrame(cusip_timeseries[cusip2]).sort_values(by=["Date"])
     if date_subset:
@@ -208,7 +212,7 @@ def cusip_spread_rv_regression(
     for _, row in tqdm.tqdm(cusip1_df.iterrows(), desc=f"{label1} Metrics Calc"):
         cusip1_metrics.append(
             calc_ust_metrics(
-                bond_info=curve_data_fetcher.ust_data_fetcher.cusip_to_ust_label(cusip=row["cusip"]),
+                bond_info=usts_obj.cusip_to_ust_label(cusip=row["cusip"]),
                 curr_price=row["eod_price"],
                 curr_ytm=row["eod_yield"],
                 as_of_date=row["Date"],
@@ -222,7 +226,7 @@ def cusip_spread_rv_regression(
     for _, row in tqdm.tqdm(cusip2_df.iterrows(), desc=f"{label2} Metrics Calc"):
         cusip2_metrics.append(
             calc_ust_metrics(
-                bond_info=curve_data_fetcher.ust_data_fetcher.cusip_to_ust_label(cusip=row["cusip"]),
+                bond_info=usts_obj.cusip_to_ust_label(cusip=row["cusip"]),
                 curr_price=row["eod_price"],
                 curr_ytm=row["eod_yield"],
                 as_of_date=row["Date"],
