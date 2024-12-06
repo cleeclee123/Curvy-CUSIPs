@@ -81,6 +81,10 @@ python update_sofr_ois._db.py
 - Spread, Flies plotting
 - Swap Fwds
 
+### [par_curves.ipynb](https://github.com/yieldcurvemonkey/Curvy-CUSIPs/blob/main/notebooks/par_curves.ipynb)
+
+![womp womp](./dump/Screenshot%202024-12-05%20221335.png)
+
 ### [sabr_smile.ipynb](https://github.com/yieldcurvemonkey/Curvy-CUSIPs/blob/main/notebooks/sabr_smile.ipynb)
 
 ![til](./dump/sabrsmileexample.gif)

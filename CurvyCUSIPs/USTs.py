@@ -356,17 +356,25 @@ class USTs:
         if not end_date:
             end_date = start_date
 
+        keys = set()
+        if fetch_soma_holdings:
+            keys.add("soma_holdings")
+        if fetch_stripping_data:
+            keys.add("ust_stripping")
         if calc_free_float:
             fetch_soma_holdings = True
             fetch_stripping_data = True
+            keys.add("soma_holdings")
+            keys.add("ust_stripping")
+        known_keys = list(keys)
 
         async def gather_tasks(client: httpx.AsyncClient, dates: datetime, max_concurrent_tasks):
             my_semaphore = asyncio.Semaphore(max_concurrent_tasks)
-            tasks += []
+            tasks = []
 
             if fetch_soma_holdings:
                 soma_bwd_date: pd.Timestamp = start_date - BDay(5)
-                tasks += await self.nyfrb_data_fetcher._build_fetch_tasks_historical_soma_holdings(
+                tasks += await self.curve_data_fetcher.nyfrb_data_fetcher._build_fetch_tasks_historical_soma_holdings(
                     client=client,
                     dates=[soma_bwd_date.to_pydatetime()] + dates,
                     uid="soma_holdings",
@@ -376,7 +384,7 @@ class USTs:
 
             if fetch_stripping_data:
                 strips_bwd_date: pd.Timestamp = start_date - BDay(20)
-                tasks += await self.ust_data_fetcher._build_fetch_tasks_historical_stripping_activity(
+                tasks += await self.curve_data_fetcher.ust_data_fetcher._build_fetch_tasks_historical_stripping_activity(
                     client=client,
                     dates=[strips_bwd_date.to_pydatetime()] + dates,
                     uid="ust_stripping",
@@ -384,7 +392,6 @@ class USTs:
                     my_semaphore=my_semaphore,
                 )
 
-            # return await asyncio.gather(*tasks)
             return await tqdm.asyncio.tqdm.gather(*tasks, desc="FETCHING CURVE SETS...")
 
         async def run_fetch_all(dates: datetime, max_concurrent_tasks: int, max_connections: int):
@@ -407,9 +414,16 @@ class USTs:
         results: List[Tuple[datetime, pd.DataFrame, str]] = asyncio.run(
             run_fetch_all(dates=bdates, max_concurrent_tasks=max_concurrent_tasks, max_connections=max_connections)
         )
-        sorted_results = sorted(results, key=lambda x: x[0])
+        grouped_results = {key: {} for key in known_keys}
+        for dt, df, group_key in results:
+            if group_key in grouped_results:
+                grouped_results[group_key][dt] = df
+            else:
+                raise ValueError(f"Unexpected group key encountered: {group_key}")
+        
+        curve_sets = self.get_ust_cusip_sets(start_date=start_date, end_date=end_date) 
 
-        auctions_df: pl.DataFrame = pl.from_pandas(self.ust_data_fetcher._historical_auctions_df.copy())
+        auctions_df: pl.DataFrame = pl.from_pandas(self._historical_auctions_df.copy())
         auctions_df = auctions_df.filter(
             (pl.col("security_type") == "Bill") | (pl.col("security_type") == "Note") | (pl.col("security_type") == "Bond")
         )
@@ -422,115 +436,115 @@ class USTs:
             .alias("original_security_term")
         )
 
-        last_seen_soma_holdings_df = None
-        last_seen_stripping_act_df = None
         curveset_dict_df: Dict[datetime, List[pd.DataFrame]] = {}
         curveset_intrep_dict: Dict[datetime, Dict[str, GeneralCurveInterpolator]] = {}
 
-        for tup in tqdm.tqdm(sorted_results, desc="AGGREGATING CURVE SET DFs"):
-            curr_dt = tup[0]
-            uid = tup[-1]
+        for curr_dt, curve_set_df in tqdm.tqdm(curve_sets.items(), desc="AGGREGATING CURVE SET DFs"):
+            last_seen_soma_holdings_df = None
+            last_seen_stripping_act_df = None
+            
+            fetched_soma_holdings_dates = [dt for dt in grouped_results["soma_holdings"].keys() if dt < curr_dt]
+            if fetched_soma_holdings_dates:
+                closest = max(fetched_soma_holdings_dates)  
+                last_seen_soma_holdings_df = pl.from_pandas(grouped_results["soma_holdings"][closest])
+            else:
+                raise ValueError("Couldnt find valid SOMA holding dates fetched")
 
-            if tup[1] is None or tup[1].empty:
-                continue
+            fetched_ust_stripping_dates = [dt for dt in grouped_results["ust_stripping"].keys() if dt < curr_dt]
+            if fetched_ust_stripping_dates:
+                closest = max(fetched_ust_stripping_dates)  
+                last_seen_stripping_act_df = pl.from_pandas(grouped_results["ust_stripping"][closest])
+            else:
+                raise ValueError("Couldnt find valid UST stripping dates fetched")
 
-            if uid == "soma_holdings":
-                last_seen_soma_holdings_df = pl.from_pandas(tup[1])
-                continue
+            price_df = pl.from_pandas(curve_set_df)
+            curr_auctions_df = auctions_df.filter(
+                (pl.col("issue_date").dt.date() <= curr_dt.date()) & (pl.col("maturity_date") >= curr_dt)
+            ).unique(subset=["cusip"], keep="first")
 
-            if uid == "ust_stripping":
-                last_seen_stripping_act_df = pl.from_pandas(tup[1])
-                continue
+            merged_df = curr_auctions_df.join(price_df, on="cusip", how="outer")
 
-            if uid == "ust_prices":
-                price_df = pl.from_pandas(tup[1])
-                curr_auctions_df = auctions_df.filter(
-                    (pl.col("issue_date").dt.date() <= curr_dt.date()) & (pl.col("maturity_date") >= curr_dt)
-                ).unique(subset=["cusip"], keep="first")
+            if fetch_soma_holdings and last_seen_soma_holdings_df is not None:
+                merged_df = merged_df.join(last_seen_soma_holdings_df, on="cusip", how="left")
+            if fetch_stripping_data and last_seen_stripping_act_df is not None:
+                merged_df = merged_df.join(last_seen_stripping_act_df, on="cusip", how="left")
 
-                merged_df = curr_auctions_df.join(price_df, on="cusip", how="outer")
+            merged_df = merged_df.filter(pl.col("cusip").map_elements(is_valid_ust_cusip, return_dtype=pl.Boolean))
+            merged_df = merged_df.with_columns(pl.col("maturity_date").cast(pl.Datetime).alias("maturity_date"))
+            merged_df = merged_df.with_columns(((pl.col("maturity_date") - curr_dt).dt.total_days() / 365).alias("time_to_maturity"))
+            merged_df = merged_df.with_columns(
+                pl.col("time_to_maturity").rank(descending=True, method="ordinal").over("original_security_term").sub(1).alias("rank")
+            )
 
-                if fetch_soma_holdings and last_seen_soma_holdings_df is not None:
-                    merged_df = merged_df.join(last_seen_soma_holdings_df, on="cusip", how="left")
-                if fetch_stripping_data and last_seen_stripping_act_df is not None:
-                    merged_df = merged_df.join(last_seen_stripping_act_df, on="cusip", how="left")
-
-                merged_df = merged_df.filter(pl.col("cusip").map_elements(is_valid_ust_cusip, return_dtype=pl.Boolean))
-                merged_df = merged_df.with_columns(pl.col("maturity_date").cast(pl.Datetime).alias("maturity_date"))
-                merged_df = merged_df.with_columns(((pl.col("maturity_date") - curr_dt).dt.total_days() / 365).alias("time_to_maturity"))
+            if calc_free_float:
                 merged_df = merged_df.with_columns(
-                    pl.col("time_to_maturity").rank(descending=True, method="ordinal").over("original_security_term").sub(1).alias("rank")
+                    pl.col("parValue").cast(pl.Float64).fill_null(0).alias("parValue"),
+                    (pl.col("portion_stripped_amt").cast(pl.Float64).fill_null(0) * 1000).alias("portion_stripped_amt"),
+                    (
+                        pl.when((pl.col("est_outstanding_amt").is_not_nan()) & (pl.col("est_outstanding_amt") != 0))
+                        .then(pl.col("est_outstanding_amt"))
+                        .otherwise(pl.col("outstanding_amt"))
+                        .cast(pl.Float64)
+                        .fill_null(0)
+                        * 1000
+                    ).alias("est_outstanding_amt"),
+                )
+                merged_df = merged_df.with_columns(
+                    ((pl.col("est_outstanding_amt") - pl.col("parValue") - pl.col("portion_stripped_amt")) / 1_000_000).alias("free_float")
                 )
 
-                if calc_free_float:
-                    merged_df = merged_df.with_columns(
-                        pl.col("parValue").cast(pl.Float64).fill_null(0).alias("parValue"),
-                        (pl.col("portion_stripped_amt").cast(pl.Float64).fill_null(0) * 1000).alias("portion_stripped_amt"),
-                        (
-                            pl.when((pl.col("est_outstanding_amt").is_not_nan()) & (pl.col("est_outstanding_amt") != 0))
-                            .then(pl.col("est_outstanding_amt"))
-                            .otherwise(pl.col("outstanding_amt"))
-                            .cast(pl.Float64)
-                            .fill_null(0)
-                            * 1000
-                        ).alias("est_outstanding_amt"),
-                    )
-                    merged_df = merged_df.with_columns(
-                        ((pl.col("est_outstanding_amt") - pl.col("parValue") - pl.col("portion_stripped_amt")) / 1_000_000).alias("free_float")
-                    )
+            curr_curve_set_df = merged_df.to_pandas()
+            if sorted_curve_set:
+                curr_curve_set_df["sort_key"] = curr_curve_set_df["original_security_term"].apply(ust_sorter)
+                curr_curve_set_df = (
+                    curr_curve_set_df.sort_values(by=["sort_key", "time_to_maturity"]).drop(columns="sort_key").reset_index(drop=True)
+                )
 
-                curr_curve_set_df = merged_df.to_pandas()
-                if sorted_curve_set:
-                    curr_curve_set_df["sort_key"] = curr_curve_set_df["original_security_term"].apply(ust_sorter)
-                    curr_curve_set_df = (
-                        curr_curve_set_df.sort_values(by=["sort_key", "time_to_maturity"]).drop(columns="sort_key").reset_index(drop=True)
-                    )
+            curveset_dict_df[curr_dt] = curr_curve_set_df
 
-                curveset_dict_df[curr_dt] = curr_curve_set_df
+            if fitted_curves:
+                for curve_build_params in fitted_curves:
+                    if len(curve_build_params) == 3:
+                        if callable(curve_build_params[-1]):
+                            curve_set_key, quote_type, filter_func = curve_build_params
+                            curr_filtered_curve_set_df: pd.DataFrame = filter_func(curr_curve_set_df)
 
-                if fitted_curves:
-                    for curve_build_params in fitted_curves:
-                        if len(curve_build_params) == 3:
-                            if callable(curve_build_params[-1]):
-                                curve_set_key, quote_type, filter_func = curve_build_params
-                                curr_filtered_curve_set_df: pd.DataFrame = filter_func(curr_curve_set_df)
+                            if curr_dt not in curveset_intrep_dict:
+                                curveset_intrep_dict[curr_dt] = {}
+                            if curve_set_key not in curveset_intrep_dict[curr_dt]:
+                                curveset_intrep_dict[curr_dt][curve_set_key] = {}
 
-                                if curr_dt not in curveset_intrep_dict:
-                                    curveset_intrep_dict[curr_dt] = {}
-                                if curve_set_key not in curveset_intrep_dict[curr_dt]:
-                                    curveset_intrep_dict[curr_dt][curve_set_key] = {}
+                            curveset_intrep_dict[curr_dt][curve_set_key] = GeneralCurveInterpolator(
+                                x=curr_filtered_curve_set_df["time_to_maturity"].to_numpy(), y=curr_filtered_curve_set_df[quote_type].to_numpy()
+                            )
 
-                                curveset_intrep_dict[curr_dt][curve_set_key] = GeneralCurveInterpolator(
-                                    x=curr_filtered_curve_set_df["time_to_maturity"].to_numpy(), y=curr_filtered_curve_set_df[quote_type].to_numpy()
+                    elif len(curve_build_params) == 4:
+                        if callable(curve_build_params[-2]) and callable(curve_build_params[-2]):
+                            curve_set_key, quote_type, filter_func, calibrate_func = curve_build_params
+                            curr_filtered_curve_set_df: pd.DataFrame = filter_func(curr_curve_set_df)
+
+                            if curr_dt not in curveset_intrep_dict:
+                                curveset_intrep_dict[curr_dt] = {}
+                            if curve_set_key not in curveset_intrep_dict[curr_dt]:
+                                curveset_intrep_dict[curr_dt][curve_set_key] = {}
+
+                            try:
+                                curr_filtered_curve_set_df = (
+                                    curr_filtered_curve_set_df[["time_to_maturity", quote_type]].dropna().sort_values(by="time_to_maturity")
                                 )
+                                parameteric_model = calibrate_func(
+                                    curr_filtered_curve_set_df["time_to_maturity"].to_numpy(),
+                                    curr_filtered_curve_set_df[quote_type].to_numpy(),
+                                )
+                                assert parameteric_model[1]
+                                curveset_intrep_dict[curr_dt][curve_set_key] = parameteric_model[0]
 
-                        elif len(curve_build_params) == 4:
-                            if callable(curve_build_params[-2]) and callable(curve_build_params[-2]):
-                                curve_set_key, quote_type, filter_func, calibrate_func = curve_build_params
-                                curr_filtered_curve_set_df: pd.DataFrame = filter_func(curr_curve_set_df)
-
-                                if curr_dt not in curveset_intrep_dict:
-                                    curveset_intrep_dict[curr_dt] = {}
-                                if curve_set_key not in curveset_intrep_dict[curr_dt]:
-                                    curveset_intrep_dict[curr_dt][curve_set_key] = {}
-
-                                try:
-                                    curr_filtered_curve_set_df = (
-                                        curr_filtered_curve_set_df[["time_to_maturity", quote_type]].dropna().sort_values(by="time_to_maturity")
-                                    )
-                                    parameteric_model = calibrate_func(
-                                        curr_filtered_curve_set_df["time_to_maturity"].to_numpy(),
-                                        curr_filtered_curve_set_df[quote_type].to_numpy(),
-                                    )
-                                    assert parameteric_model[1]
-                                    curveset_intrep_dict[curr_dt][curve_set_key] = parameteric_model[0]
-
-                                except Exception as e:
-                                    # print(f"{curve_set_key} for {curr_dt} - {str(e)}")
-                                    curveset_intrep_dict[curr_dt][curve_set_key] = NoneReturningSpline(
-                                        curr_filtered_curve_set_df["time_to_maturity"].to_numpy(),
-                                        curr_filtered_curve_set_df[quote_type].to_numpy(),
-                                    )
+                            except Exception as e:
+                                # print(f"{curve_set_key} for {curr_dt} - {str(e)}")
+                                curveset_intrep_dict[curr_dt][curve_set_key] = NoneReturningSpline(
+                                    curr_filtered_curve_set_df["time_to_maturity"].to_numpy(),
+                                    curr_filtered_curve_set_df[quote_type].to_numpy(),
+                                )
 
         if fitted_curves:
             return curveset_dict_df, curveset_intrep_dict

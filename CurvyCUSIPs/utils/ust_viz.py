@@ -268,8 +268,9 @@ def plot_usts(
     ust_labels_filter: Optional[List[str]] = None,
     cusips_hightlighter: Optional[List[str]] = None,
     ust_labels_highlighter: Optional[List[Tuple[str, str] | str]] = None,
+    plot_par_model_residuals: Optional[bool] = False,
     linspace_num: Optional[int] = 1000,
-    y_axis_range: Optional[Annotated[List[int], 2]] = [3.33, 5.5],
+    y_axis_range: Optional[Annotated[List[int], 2]] = [3, 5.5],
     plot_height=1000,
     plot_width=None,
 ):
@@ -420,17 +421,6 @@ def plot_usts(
                 )
             )
 
-        zero_spline, label = zero_curves[0]
-        residuals = curve_set_df[ytm_col].to_numpy() - zero_spline(curve_set_df[ttm_col].to_numpy())
-        plt.figure(figsize=(20, 10))
-        plt.scatter(curve_set_df[ttm_col], residuals * 100, color="b", label="Residuals (bps)")
-        plt.axhline(0, color="r", linestyle="--")
-        plt.xlabel(ttm_col)
-        plt.ylabel("Residuals (bps)")
-        plt.title(f"Residuals of {label} Spline Fit", fontdict={"fontsize": "x-large"})
-        plt.legend(fontsize="x-large")
-        plt.ylim(-50, 50)
-
     if par_curves:
         cfs = np.arange(0.5, 30 + 1, 0.5)
         for curve_tup in par_curves:
@@ -445,6 +435,18 @@ def plot_usts(
                     name=label,
                 )
             )
+
+        if plot_par_model_residuals:
+            par_spline, label = par_curves[0]
+            residuals = curve_set_df[ytm_col].to_numpy() - par_spline(curve_set_df[ttm_col].to_numpy())
+            plt.figure(figsize=(20, 10))
+            plt.scatter(curve_set_df[ttm_col], residuals * 100, color="b", label="Residuals (bps)")
+            plt.axhline(0, color="r", linestyle="--")
+            plt.xlabel(ttm_col)
+            plt.ylabel("Residuals (bps)")
+            plt.title(f"Residuals of {label} Spline Fit", fontdict={"fontsize": "x-large"})
+            plt.legend(fontsize="x-large")
+            plt.ylim(-50, 50)
 
     if n_yr_fwd_curves:
         ttm_linspace = np.linspace(0.5, 30, linspace_num)
