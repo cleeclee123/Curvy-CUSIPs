@@ -1,4 +1,3 @@
-
 import shelve
 import time
 import warnings
@@ -14,84 +13,113 @@ from pandas.tseries.offsets import BDay, BMonthEnd, CustomBusinessDay
 from termcolor import colored
 
 import sys
+
 sys.path.insert(0, "../")
-from CurvyCUSIPs.CurveDataFetcher import CurveDataFetcher 
+from CurvyCUSIPs.CurveDataFetcher import CurveDataFetcher
 from CurvyCUSIPs.utils.dtcc_swaps_utils import DEFAULT_SWAP_TENORS, tenor_to_years, build_ql_piecewise_curves, datetime_to_ql_date, tenor_to_ql_period
+from CurvyCUSIPs.utils.ShelveDBWrapper import ShelveDBWrapper
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=pd.errors.SettingWithCopyWarning)
 
-
 t_main = time.time()
+
 verbose = True
-DB_PATH = "../db/nyclose_sofr_ois_main"
+DB_PATH = "../db/nyclose_sofr_ois"
 
 if __name__ == "__main__":
-    data_fetcher = CurveDataFetcher(error_verbose=verbose)
 
-    df = pd.read_excel("../db/xlsx/bbg_s490_data_dump.xlsx", sheet_name="data")
-    columns = [
-        "Date",
-        "1M",
-        "2M",
-        "3M",
-        "4M",
-        "5M",
-        "6M",
-        "7M",
-        "8M",
-        "9M",
-        "10M",
-        "11M",
-        "12M",
-        "13M",
-        "14M",
-        "15M",
-        "16M",
-        "17M",
-        "18M",
-        "19M",
-        "20M",
-        "21M",
-        "22M",
-        "23M",
-        "2Y",
-        "2Y3M",
-        "2Y6M",
-        "2Y9M",
-        "3Y",
-        "4Y",
-        "5Y",
-        "6Y",
-        "7Y",
-        "8Y",
-        "9Y",
-        "10Y",
-        "15Y",
-        "20Y",
-        "25Y",
-        "30Y",
-        "40Y",
-        "50Y",
-    ]
-    df.columns = columns
-    df = df.drop(columns=["2Y3M", "2Y6M", "2Y9M"])
-    df["Date"] = pd.to_datetime(df["Date"])
+    if len(sys.argv) >= 2 and sys.argv[1] == "init":
+        data_fetcher = CurveDataFetcher(error_verbose=verbose)
+        df = pd.read_excel("../db/xlsx/bbg_s490_data_dump.xlsx", sheet_name="data")
+        columns = [
+            "Date",
+            "1M",
+            "2M",
+            "3M",
+            "4M",
+            "5M",
+            "6M",
+            "7M",
+            "8M",
+            "9M",
+            "10M",
+            "11M",
+            "12M",
+            "13M",
+            "14M",
+            "15M",
+            "16M",
+            "17M",
+            "18M",
+            "19M",
+            "20M",
+            "21M",
+            "22M",
+            "23M",
+            "2Y",
+            "2Y3M",
+            "2Y6M",
+            "2Y9M",
+            "3Y",
+            "4Y",
+            "5Y",
+            "6Y",
+            "7Y",
+            "8Y",
+            "9Y",
+            "10Y",
+            "15Y",
+            "20Y",
+            "25Y",
+            "30Y",
+            "40Y",
+            "50Y",
+        ]
+        df.columns = columns
+        df = df.drop(columns=["2Y3M", "2Y6M", "2Y9M"])
+        df["Date"] = pd.to_datetime(df["Date"])
 
-    ybday: pd.Timestamp = datetime.today() - BDay(1)
+        sofr_fixing_rates_df = data_fetcher.nyfrb_data_fetcher.get_sofr_fixings_df(
+            start_date=datetime(2018, 4, 1), end_date=(datetime.today() - BDay(1)).to_pydatetime()
+        )
+        sofr_fixing_rates_df["percentRate"] = sofr_fixing_rates_df["percentRate"] / 100
+        sofr_fixing_rates_df = sofr_fixing_rates_df[["effectiveDate", "percentRate"]]
+        
+        historical_sofr_df = pd.read_excel(
+            "../db/xlsx/calculated_historical_sofr_fixings.xlsx", sheet_name="VWM Rates", header=1, usecols=[0, 1, 2, 3]
+        )
+        historical_sofr_df["effectiveDate"] = pd.to_datetime(historical_sofr_df["Date"], errors="coerce")
+        historical_sofr_df["percentRate"] = historical_sofr_df["Secured Overnight Financing Rate"] / 100 / 100
+        historical_sofr_df = historical_sofr_df[["effectiveDate", "percentRate"]]
+        
+        sofr_fixing_rates_df = pd.concat([historical_sofr_df, sofr_fixing_rates_df]).reset_index(drop=True)
+        sofr_fixing_rates_df = sofr_fixing_rates_df.drop_duplicates(subset=["effectiveDate"])
+        sofr_fixing_rates_df = sofr_fixing_rates_df.sort_values(by=["effectiveDate"])
+        
+        eris_dict = data_fetcher.eris_data_fetcher.fetch_eris_ftp_timeseries(
+            start_date=datetime(2024, 1, 12), end_date=(datetime.today() - BDay(1)).to_pydatetime()
+        )
 
-    eris_dict = data_fetcher.eris_data_fetcher.fetch_eris_ftp_timeseries(start_date=datetime(2024, 1, 12), end_date=ybday.to_pydatetime())
+        start_date = datetime(2018, 1, 1)
+        end_date = (datetime.today() - BDay(1)).to_pydatetime()
+        
+    else:
+        my_db = ShelveDBWrapper(DB_PATH)
+        my_db.open()
+        most_recent_db_dt = datetime.fromtimestamp(int(max(my_db.keys())))
+        bday_offset = ((datetime.today() - BDay(1)) - most_recent_db_dt).days
+        
+        if bday_offset == 0 and len(sys.argv) == 1:
+            print(colored("DB is up to date - exiting...", "green"))
+            sys.exit()
 
-    sofr_fixing_rates_df = data_fetcher.nyfrb_data_fetcher.get_sofr_fixings_df(start_date=datetime(2018, 4, 1), end_date=ybday.to_pydatetime())
-    sofr_fixing_rates_df["percentRate"] = sofr_fixing_rates_df["percentRate"] / 100
-    sofr_fixing_rates_df = sofr_fixing_rates_df[["effectiveDate", "percentRate"]]
-    historical_sofr_df = pd.read_excel("../db/xlsx/calculated_historical_sofr_fixings.xlsx", sheet_name="VWM Rates", header=1, usecols=[0, 1, 2, 3])
-    historical_sofr_df["effectiveDate"] = pd.to_datetime(historical_sofr_df["Date"], errors="coerce")
-    historical_sofr_df["percentRate"] = historical_sofr_df["Secured Overnight Financing Rate"] / 100 / 100
-    historical_sofr_df = historical_sofr_df[["effectiveDate", "percentRate"]]
-    sofr_fixing_rates_df = pd.concat([historical_sofr_df, sofr_fixing_rates_df]).reset_index(drop=True)
-    sofr_fixing_rates_df = sofr_fixing_rates_df.drop_duplicates(subset=["effectiveDate"])
-    sofr_fixing_rates_df = sofr_fixing_rates_df.sort_values(by=["effectiveDate"])
+        data_fetcher = CurveDataFetcher(error_verbose=verbose)
+        start_date = (datetime.today() - BDay(bday_offset)).to_pydatetime()
+        end_date = datetime.today() if len(sys.argv) > 1 else (datetime.today() - BDay(1)).to_pydatetime()
+
+        sofr_fixing_rates_df = data_fetcher.nyfrb_data_fetcher.get_sofr_fixings_df(start_date=start_date, end_date=end_date)
+        eris_dict = data_fetcher.eris_data_fetcher.fetch_eris_ftp_timeseries(start_date=start_date, end_date=end_date)
 
     if verbose:
         print("sofr_fixing_rates_df: ")
@@ -112,17 +140,51 @@ if __name__ == "__main__":
     ]
 
     with shelve.open(DB_PATH) as db:
-        start_date = datetime(2018, 1, 1)
         for curr_bdate in tqdm.tqdm(
-            pd.date_range(start=start_date, end=ybday.to_pydatetime(), freq=CustomBusinessDay(calendar=USFederalHolidayCalendar())),
+            pd.date_range(start=start_date, end=end_date, freq=CustomBusinessDay(calendar=USFederalHolidayCalendar())),
             desc="Writing to DB...",
         ):
             curr_bdate_dt = curr_bdate.to_pydatetime().replace(hour=0, minute=0, second=0, microsecond=0)
 
             try:
-                print(colored(f"Starting: {curr_bdate_dt}", "green")) if verbose else None
+                print(colored(f"\n Starting {curr_bdate_dt}", "green")) if verbose else None
                 t1 = time.time()
-                if curr_bdate_dt > datetime(2024, 1, 12):
+
+                if len(sys.argv) == 2 and sys.argv[1] == "init":
+                    if curr_bdate_dt > datetime(2024, 1, 12):
+                        curr_df = eris_dict[curr_bdate_dt]
+                        curr_ohlc_df = pd.DataFrame(
+                            {
+                                "Expiry": pd.to_datetime(curr_df["MaturityDate"], errors="coerce", format="%m/%d/%Y"),
+                                "Tenor": [sym[4:] for sym in curr_df["Symbol"].to_list()],
+                                "Close": curr_df["Coupon (%)"].to_numpy() / 100,
+                            }
+                        )
+                        if "1D" not in curr_ohlc_df["Tenor"].to_numpy():
+                            on_rate = sofr_fixing_rates_df[sofr_fixing_rates_df["effectiveDate"].dt.date == curr_bdate_dt.date()][
+                                "percentRate"
+                            ].iloc[-1]
+                            on_expiry: pd.Timestamp = curr_bdate_dt + BDay(2)
+                            curr_ohlc_df.loc[-1] = [on_expiry.to_pydatetime(), "1D", on_rate]
+                            curr_ohlc_df.index = curr_ohlc_df.index + 1
+                            curr_ohlc_df.sort_index(inplace=True)
+                    else:
+                        curr_df = df[df["Date"].dt.date == curr_bdate_dt.date()]
+                        tenors = ["1D"] + curr_df.columns[1:].to_list()
+                        close_rates = [
+                            sofr_fixing_rates_df[sofr_fixing_rates_df["effectiveDate"].dt.date == curr_bdate_dt.date()]["percentRate"].iloc[-1]
+                        ] + list(curr_df.values[0][1:] / 100)
+                        curr_ohlc_df = pd.DataFrame(
+                            {
+                                "Expiry": [
+                                    calendar.advance(datetime_to_ql_date(curr_bdate_dt), tenor_to_ql_period(tenor)).to_date() for tenor in tenors
+                                ],
+                                "Tenor": tenors,
+                                "Close": close_rates,
+                            }
+                        )
+
+                else:
                     curr_df = eris_dict[curr_bdate_dt]
                     curr_ohlc_df = pd.DataFrame(
                         {
@@ -132,31 +194,14 @@ if __name__ == "__main__":
                         }
                     )
                     if "1D" not in curr_ohlc_df["Tenor"].to_numpy():
-                        on_rate = sofr_fixing_rates_df[sofr_fixing_rates_df["effectiveDate"].dt.date == curr_bdate_dt.date()][
-                            "percentRate"
-                        ].iloc[-1]
+                        on_rate = (
+                            sofr_fixing_rates_df[sofr_fixing_rates_df["effectiveDate"].dt.date == curr_bdate_dt.date()]["percentRate"].iloc[-1]
+                            / 100
+                        )
                         on_expiry: pd.Timestamp = curr_bdate_dt + BDay(2)
                         curr_ohlc_df.loc[-1] = [on_expiry.to_pydatetime(), "1D", on_rate]
                         curr_ohlc_df.index = curr_ohlc_df.index + 1
                         curr_ohlc_df.sort_index(inplace=True)
-                else:
-                    curr_df = df[df["Date"].dt.date == curr_bdate_dt.date()]
-                    tenors = ["1D"] + curr_df.columns[1:].to_list()
-                    close_rates = [
-                        sofr_fixing_rates_df[sofr_fixing_rates_df["effectiveDate"].dt.date == curr_bdate_dt.date()]["percentRate"].iloc[
-                            -1
-                        ]
-                    ] + list(curr_df.values[0][1:] / 100)
-                    curr_ohlc_df = pd.DataFrame(
-                        {
-                            "Expiry": [
-                                calendar.advance(datetime_to_ql_date(curr_bdate_dt), tenor_to_ql_period(tenor)).to_date()
-                                for tenor in tenors
-                            ],
-                            "Tenor": tenors,
-                            "Close": close_rates,
-                        }
-                    )
 
                 curr_ohlc_df = curr_ohlc_df[curr_ohlc_df["Close"].notna()]
                 curr_ohlc_df["Expiry"] = pd.to_datetime(curr_ohlc_df["Expiry"])
@@ -170,6 +215,7 @@ if __name__ == "__main__":
                     tenor_to_years(t): {col: curr_ohlc_df.loc[curr_ohlc_df["Tenor"] == t, col].values[0] for col in ["Close"]}
                     for t in curr_ohlc_df["Tenor"]
                 }
+                print("hello2")
 
                 def log_linear_interp1d(x, y, fill_value="extrapolate", **kwargs):
                     log_y = np.log(y)
@@ -184,7 +230,8 @@ if __name__ == "__main__":
                     y = curr_ohlc_df[col].values
                     y_new = log_linear_interp1d(x, y)(x_new)
                     interp_df[col] = [
-                        tenor_map[tenor_to_years(t)][col] if tenor_to_years(t) in tenor_map else y_val for t, y_val in zip(DEFAULT_SWAP_TENORS, y_new)
+                        tenor_map[tenor_to_years(t)][col] if tenor_to_years(t) in tenor_map else y_val
+                        for t, y_val in zip(DEFAULT_SWAP_TENORS, y_new)
                     ]
 
                 settlement_date: pd.Timestamp = curr_bdate_dt + BDay(2)
@@ -194,7 +241,9 @@ if __name__ == "__main__":
                     "Expiry",
                     [
                         ql.UnitedStates(ql.UnitedStates.GovernmentBond)
-                        .advance(datetime_to_ql_date(settlement_date.to_pydatetime()), tenor_to_ql_period(t), ql.ModifiedFollowing, is_end_of_bmonth)
+                        .advance(
+                            datetime_to_ql_date(settlement_date.to_pydatetime()), tenor_to_ql_period(t), ql.ModifiedFollowing, is_end_of_bmonth
+                        )
                         .to_date()
                         for t in interp_df["Tenor"]
                     ],
@@ -271,6 +320,7 @@ if __name__ == "__main__":
                                     evaluation_date = datetime_to_ql_date(curr_bdate_dt)
                                     ql.Settings.instance().evaluationDate = evaluation_date
 
+                                # idk why
                                 if curr_bdate_dt.date() == datetime(2022, 12, 29).date() and ql_ts == "splineCubicDiscount":
                                     ql.Settings.instance().evaluationDate = datetime_to_ql_date(curr_bdate_dt + BDay(3))
 
@@ -327,6 +377,7 @@ if __name__ == "__main__":
                 )
 
             except Exception as e:
+                print(colored(f"Something blew up - Error Message: {e}", "red"))
                 errors.append({"Date": curr_bdate_dt, "Error Message": str(e)})
 
     print(
