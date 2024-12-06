@@ -8,6 +8,7 @@ import pandas as pd
 import plotly.graph_objs as go
 import QuantLib as ql
 import scipy.optimize as optimize
+
 from IPython.display import HTML, display
 from pandas.tseries.holiday import USFederalHolidayCalendar
 from pandas.tseries.offsets import BDay, CustomBusinessDay
@@ -19,7 +20,8 @@ from CurvyCUSIPs.utils.dtcc_swaps_utils import DEFAULT_SWAP_TENORS, datetime_to_
 from CurvyCUSIPs.CurveDataFetcher import CurveDataFetcher 
 from CurvyCUSIPs.S490Swaps import S490Swaps
 
-
+# TODO
+# - prerelease numba for 3.13
 class S490Swaptions:
     s490_swaps: S490Swaps
 
@@ -222,8 +224,7 @@ class S490Swaptions:
                             maxVol=5.0,
                         )
                         swaption_trade_dict["IV"] = implied_vol * 100
-                        # TODO:
-                        # - need to implement Le Floc’h's since approx only works for near ATM
+                        # TODO: need to implement Le Floc’h's since approx only works for near ATM
                         swaption_trade_dict["IV bp/day"] = (swaption_trade_dict["IV"] * atmf / np.sqrt(252)) * 100
                     else:
                         raise ValueError("Not reachable")

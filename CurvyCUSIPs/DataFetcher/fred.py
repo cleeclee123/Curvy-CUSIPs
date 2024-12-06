@@ -642,7 +642,7 @@ class FredDataFetcher(DataFetcherBase):
         )
 
         self.fred = Fred(api_key=fred_api_key, proxies=self._proxies)
-
+    
     def get_historical_cmt_yields(
         self,
         start_date: Optional[datetime] = None,
@@ -684,4 +684,5 @@ class FredDataFetcher(DataFetcherBase):
             return df[tenors]
         df = df.dropna()
         df = df.rename_axis("Date").reset_index()
+        df = df.set_index("Date")
         return df

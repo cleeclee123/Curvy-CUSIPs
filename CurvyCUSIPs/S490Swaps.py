@@ -66,10 +66,11 @@ class S490Swaps:
         self.s490_nyclose_db.open()
 
         most_recent_db_dt = datetime.fromtimestamp(int(max(self.s490_nyclose_db.keys())))
-        if ((datetime.today() - BDay(1)) - most_recent_db_dt).days > 1:
+        self._logger.info(f"Most recent date in db: {most_recent_db_dt}")
+        if ((datetime.today() - BDay(1)) - most_recent_db_dt).days >= 1:
             print(
                 colored(
-                    f"s490_nyclose_db is behind --- cd into 'scripts' and run 'update_sofr_ois_db.py' to update --- most recent date in db: {most_recent_db_dt}",
+                    f"{s490_curve_db_path} is behind --- cd into 'scripts' and run 'update_sofr_ois_db.py' to update --- most recent date in db: {most_recent_db_dt}",
                     "yellow",
                 )
             )
@@ -85,9 +86,11 @@ class S490Swaps:
                 curr_term_structure = curr_term_structure | dict(zip(DEFAULT_SWAP_TENORS, ohlc_df["Close"] * 100))
                 ts_term_structures.append(curr_term_structure)
             except Exception as e:
-                print(colored(f'"s490_nyclose_term_structure_ts" Something went wrong at {curr_date}: {e}'), "red") if self._verbose else None
+                self._logger.error(colored(f'"s490_nyclose_term_structure_ts" Something went wrong at {curr_date}: {e}'), "red")
 
-        return pd.DataFrame(ts_term_structures)
+        df = pd.DataFrame(ts_term_structures)
+        df = df.set_index("Date")
+        return df
 
     @staticmethod
     def swap_spreads_term_structure(swaps_term_structure_ts_df: pd.DataFrame, cash_term_structure_ts_df: pd.DataFrame, is_cmt=False):

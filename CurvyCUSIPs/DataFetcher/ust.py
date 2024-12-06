@@ -237,49 +237,6 @@ class USTreasuryDataFetcher(DataFetcherBase):
             axis=1,
         )
 
-    # ust label: f"{coupon}s {datetime.strftime("%Y-%m-%d")}"
-    def cme_ust_label_to_cusip(self, ust_label: str):
-        try:
-            coupon = float(ust_label.split("s")[0])
-            maturity = ust_label.split(" ")[1]
-            ust_row = self._historical_auctions_df[
-                (self._historical_auctions_df["int_rate"] == coupon) & (self._historical_auctions_df["maturity_date"] == maturity)
-            ]
-            return ust_row.to_dict("records")[0]
-        except:
-            raise Exception("LABEL NOT FOUND")
-
-    def cusip_to_cme_ust_label(self, cusip: str):
-        ust_row = self._historical_auctions_df[self._historical_auctions_df["cusip"] == cusip].to_dict("records")[0]
-        return f"{ust_row["int_rate"]}s {ust_row["maturity_date"]}"
-
-    # ust_label = f"{row['int_rate']:.3f}% {row['maturity_date'].strftime('%b-%y')}"
-    def ust_label_to_cusip(self, ust_label: str, return_all_occurrences=False):
-        try:
-            ust_row = self._historical_auctions_df[self._historical_auctions_df["ust_label"] == ust_label]
-            occurences = ust_row.to_dict("records")
-            if return_all_occurrences:
-                return occurences
-            return occurences[-1]  # return the earliest issue date by default
-        except Exception as e:
-            if ust_row.empty:
-                raise Exception(f"LABEL NOT FOUND - {e}")
-            else:
-                raise Exception(f"SOMETHING WENT WRONG - {e}")
-
-    def cusip_to_ust_label(self, cusip: str, return_all_occurrences=False):
-        try:
-            ust_row = self._historical_auctions_df[self._historical_auctions_df["cusip"] == cusip]
-            occurences = ust_row.to_dict("records")
-            if return_all_occurrences:
-                return occurences
-            return occurences[-1]  # return the earliest issue date by default
-        except Exception as e:
-            if ust_row.empty:
-                raise Exception(f"CUSIP NOT FOUND - {e}")
-            else:
-                raise Exception(f"SOMETHING WENT WRONG - {e}")
-
     async def _build_fetch_tasks_historical_treasury_auctions(
         self,
         client: httpx.AsyncClient,

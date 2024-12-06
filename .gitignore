@@ -153,5 +153,30 @@ curvycusipsdev/
 US Factor Reference Book Payoffs, Pitfalls and Analysis of 100+ Equity Factors.pdf
 Big Data and AI Strategies Machine Learning and Alternative Data Approach to Investing.pdf
 
-nyclose_sofr_ois_main-shm
-nyclose_sofr_ois_main-wal
+nyclose_sofr_ois
+nyclose_sofr_ois-shm
+nyclose_sofr_ois-wal
+
+ust_cusip_set
+ust_cusip_set-shm
+ust_cusip_set-wal
+
+ust_cusip_timeseries
+ust_cusip_timeseries-shm
+ust_cusip_timeseries-wal
+    
+ust_eod_ct_yields
+ust_eod_ct_yields-shm
+ust_eod_ct_yields-wal
+
+ust_bid_ct_yields
+ust_bid_ct_yields-shm
+ust_bid_ct_yields-wal
+
+ust_mid_ct_yields
+ust_mid_ct_yields-shm
+ust_mid_ct_yields-wal
+
+ust_offer_ct_yields
+ust_offer_ct_yields-shm
+ust_offer_ct_yields-wal
