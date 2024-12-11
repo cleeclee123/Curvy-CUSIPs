@@ -117,11 +117,15 @@ if __name__ == "__main__":
         data_fetcher = CurveDataFetcher(error_verbose=verbose)
         start_date = (datetime.today() - BDay(bday_offset)).to_pydatetime()
         end_date = datetime.today() if len(sys.argv) > 1 else (datetime.today() - BDay(1)).to_pydatetime()
-
-        sofr_fixing_rates_df = data_fetcher.nyfrb_data_fetcher.get_sofr_fixings_df(start_date=start_date, end_date=end_date)
+        print_sofr_fixing_rates_df = True 
+        try:
+            sofr_fixing_rates_df = data_fetcher.nyfrb_data_fetcher.get_sofr_fixings_df(start_date=start_date, end_date=end_date)
+        except:
+            print_sofr_fixing_rates_df = False
+            print(colored("are you running this on the weekend? - NYFRB's website is under maintainence", "yellow"))
         eris_dict = data_fetcher.eris_data_fetcher.fetch_eris_ftp_timeseries(start_date=start_date, end_date=end_date)
 
-    if verbose:
+    if verbose and print_sofr_fixing_rates_df:
         print("sofr_fixing_rates_df: ")
         print(sofr_fixing_rates_df)
 

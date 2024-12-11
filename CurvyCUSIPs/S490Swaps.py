@@ -2,8 +2,10 @@ import logging
 from datetime import datetime
 from typing import Dict, List, Literal, Optional, Tuple
 
+import numpy as np
 import pandas as pd
 import QuantLib as ql
+import tqdm
 
 from pandas.tseries.holiday import USFederalHolidayCalendar
 from pandas.tseries.offsets import BDay, CustomBusinessDay
@@ -15,7 +17,7 @@ from CurvyCUSIPs.utils.dtcc_swaps_utils import DEFAULT_SWAP_TENORS, datetime_to_
 
 
 class S490Swaps:
-    s490_nyclose_db = None
+    s490_nyclose_db: ShelveDBWrapper = None
 
     _logger = logging.getLogger(__name__)
     _debug_verbose: bool = False
@@ -115,12 +117,12 @@ class S490Swaps:
         ql_zero_curve_method: Optional[ql.ZeroCurve] = ql.ZeroCurve,
         ql_compounding=ql.Compounded,
         ql_compounding_freq=ql.Daily,
-        bp_fixed_adjustment: Optional[int] = -10,
+        use_ql_implied_ts: Optional[bool] = True,
     ) -> Tuple[Dict[datetime, pd.DataFrame], Dict[datetime, ql.DiscountCurve | ql.ZeroCurve | ql.ForwardCurve]]:
         bdates = pd.date_range(start=start_date, end=end_date, freq=CustomBusinessDay(calendar=USFederalHolidayCalendar()))
         fwd_term_structure_grids: Dict[datetime, pd.DataFrame] = {}
         ql_curves: Dict[datetime, ql.DiscountCurve | ql.ZeroCurve | ql.ForwardCurve] = {}
-        for curr_date in bdates:
+        for curr_date in tqdm.tqdm(bdates, "Building Implied Fwd Curves..."):
             try:
                 str_ts = str(int(curr_date.to_pydatetime().timestamp()))
                 ql_piecewise_term_struct_nodes: Dict = self.s490_nyclose_db.get(str_ts)[ql_piecewise_method]
@@ -161,41 +163,33 @@ class S490Swaps:
                     swaption_ts_df = swaption_time_and_sales_dict_for_fwds[curr_date.to_pydatetime()]
                     fwd_tenors = swaption_ts_df["Option Tenor"].unique()
 
-                for fwd_rate_tenor in fwd_tenors:
-                    if ql_compounding == ql.Continuous or ql_compounding == ql.Simple:
-                        dict_for_df[f"{fwd_rate_tenor} Fwd"] = [
-                            (
-                                ql_curve.forwardRate(
-                                    date,
-                                    ql.UnitedStates(ql.UnitedStates.GovernmentBond).advance(date, ql.Period(fwd_rate_tenor)),
-                                    ql.Actual360(),
-                                    ql_compounding,
-                                ).rate()
-                            )
-                            * 100
-                            + bp_fixed_adjustment / 100
-                            for date in [datetime_to_ql_date(pd_ts.to_pydatetime()) for pd_ts in ohlc_df["Expiry"].to_list()]
-                        ]
-                    else:
-                        dict_for_df[f"{fwd_rate_tenor} Fwd"] = [
-                            (
-                                ql_curve.forwardRate(
-                                    date,
-                                    date + ql.Period(fwd_rate_tenor),
-                                    ql.Actual360(),
-                                    ql_compounding,
-                                    ql_compounding_freq,
-                                    True,
-                                ).rate()
-                            )
-                            * 100
-                            + bp_fixed_adjustment / 100
-                            for date in [datetime_to_ql_date(pd_ts.to_pydatetime()) for pd_ts in ohlc_df["Expiry"].to_list()]
-                        ]
+                for fwd_tenor in fwd_tenors:
+                    fwd_start_date = ql.UnitedStates(ql.UnitedStates.GovernmentBond).advance(datetime_to_ql_date(curr_date), ql.Period(fwd_tenor))
+
+                    ql_curve_to_use = ql_curve
+                    if use_ql_implied_ts:
+                        implied_ts = ql.ImpliedTermStructure(ql.YieldTermStructureHandle(ql_curve), fwd_start_date)
+                        implied_ts.enableExtrapolation()
+                        ql_curve_to_use = implied_ts
+
+                    fwds_list = []
+                    for underlying_tenor in ohlc_df["Tenor"]:
+                        try:
+                            fwd_end_date = ql.UnitedStates(ql.UnitedStates.GovernmentBond).advance(fwd_start_date, ql.Period(underlying_tenor))
+                            forward_rate = ql_curve_to_use.forwardRate(
+                                fwd_start_date, fwd_end_date, ql.Actual360(), ql_compounding, ql_compounding_freq, True
+                            ).rate()
+                            fwds_list.append(forward_rate * 100)
+                        except Exception as e:
+                            self._logger.error(f"Error computing forward rate on {curr_date.date()} for {fwd_tenor}x{underlying_tenor}: {e}")
+                            fwds_list.append(float("nan"))
+
+                    dict_for_df[f"{fwd_tenor} Fwd"] = fwds_list
 
                 fwd_term_structure_grids[curr_date] = pd.DataFrame(dict_for_df)
 
             except Exception as e:
-                print(colored(f'"s490_nyclose_fwd_grid_term_structures" Something went wrong at {curr_date}: {e}'), "red") if self._verbose else None
+                self._logger.error(colored(f'"s490_nyclose_fwd_grid_term_structures" Something went wrong at {curr_date}: {e}'), "red")
+                print(e)
 
         return fwd_term_structure_grids, ql_curves
